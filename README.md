@@ -21,3 +21,15 @@
 # Humanoid Standup
 
 Minimal training and inference code for making a humanoid robot stand up.
+
+## TODO
+
+- [ ] Implement simple MJX environment using Unitree G1 simulation artifacts, similar to [this](https://gymnasium.farama.org/environments/mujoco/humanoid_standup)
+- [ ] Implement simple PPO policy to try to make the robot stand up
+
+## Goals
+
+- The goal for this repository is to provide a super minimal implementation of a PPO policy for making a humanoid robot stand up, with only three files:
+  - `environment.py` defines a class for interacting with the environment
+  - `train.py` defines the core training loop
+  - `infer.py` generates a video clip of a trained model controlling a robot
