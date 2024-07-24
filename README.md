@@ -24,7 +24,7 @@ Minimal training and inference code for making a humanoid robot stand up.
 
 ## TODO
 
-- [ ] Implement simple MJX environment using Unitree G1 simulation artifacts, similar to [this](https://gymnasium.farama.org/environments/mujoco/humanoid_standup)
+- [ ] Implement simple MJX environment using [Unitree G1 simulation artifacts](https://humanoids.wiki/w/Robot_Descriptions_List), similar to [this](https://gymnasium.farama.org/environments/mujoco/humanoid_standup)
 - [ ] Implement simple PPO policy to try to make the robot stand up
 
 ## Goals
