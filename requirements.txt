@@ -1,4 +1,14 @@
 # requirements.txt
 
+# Training
 torch
 torchvision
+tqdm
+
+# Environment
+jax
+brax
+mediapy
+
+# Configuration management.
+omegaconf

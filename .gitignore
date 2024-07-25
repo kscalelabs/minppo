@@ -17,3 +17,7 @@ dist/
 *.so
 out*/
 *.stl
+*.txt
+
+environments/
+scratch/
