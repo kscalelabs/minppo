@@ -33,3 +33,4 @@ Minimal training and inference code for making a humanoid robot stand up.
   - `environment.py` defines a class for interacting with the environment
   - `train.py` defines the core training loop
   - `infer.py` generates a video clip of a trained model controlling a robot
+  - Install proper CUDA (e.g. `pip install --upgrade "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html`)
