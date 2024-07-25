@@ -16,7 +16,7 @@ import mujoco_py
 import mediapy as media
 from brax import base, envs
 
-from environments.robot_mjx import HumanoidEnv, RobotMJXEnv
+from environments.robot_mjx import HumanoidEnv
 import environments
 
 
@@ -156,6 +156,7 @@ def main():
             media.write_video(f"videos/video{i}.mp4", images, fps=fps)
 
         ppo.train(memory)
+
 
 if __name__ == "__main__":
     main()
