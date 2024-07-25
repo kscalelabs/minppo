@@ -5,9 +5,12 @@ from collections import deque
 from dataclasses import dataclass, field
 
 import jax
+import jax.numpy as jnp
+from flax import linen
 import mediapy as media
 import numpy as np
 import torch
+from brax.envs import State
 from torch import nn, optim
 from tqdm import tqdm
 
@@ -19,6 +22,7 @@ class Config:
     lr_actor: float = field(default=0.0003)
     lr_critic: float = field(default=0.0003)
     num_iterations: int = field(default=15000)
+    num_envs: int = field(default=16)
     max_steps: int = field(default=10000)
     max_steps_per_epoch: int = field(default=2048)
     gamma: float = field(default=0.98)
@@ -30,19 +34,24 @@ class Config:
 
 
 class Ppo:
-    def __init__(self, N_S, N_A, config: Config) -> None:
-        self.actor_net = Actor(N_S, N_A)
-        self.critic_net = Critic(N_S)
+    def __init__(self, observation_size, action_size, config: Config) -> None:
+        self.actor_net = Actor(observation_size, action_size)
+        self.critic_net = Critic(observation_size)
         self.actor_optim = optim.Adam(self.actor_net.parameters(), lr=config.lr_actor)
         self.critic_optim = optim.Adam(self.critic_net.parameters(), lr=config.lr_critic, weight_decay=config.l2_rate)
         self.critic_loss_func = torch.nn.MSELoss()
 
     def train(self, memory, config):
         states = torch.tensor(np.vstack([e[0] for e in memory]), dtype=torch.float32)
-
         actions = torch.tensor(np.array([e[1] for e in memory]), dtype=torch.float32)
         rewards = torch.tensor(np.array([e[2] for e in memory]), dtype=torch.float32)
         masks = torch.tensor(np.array([e[3] for e in memory]), dtype=torch.float32)
+
+        # parallelization for many devices -- requires models to be jax-compatible
+        # num_devices = jax.device_count()
+        # if num_devices > 1:
+        #     self.actor_net = jax.pmap(self.actor_net)
+        #     self.critic_net = jax.pmap(self.critic_net)
 
         values = self.critic_net(states)
 
@@ -99,7 +108,6 @@ class Ppo:
                 self.actor_optim.step()
 
     def kl_divergence(self, old_mu, old_sigma, mu, sigma):
-
         old_mu = old_mu.detach()
         old_sigma = old_sigma.detach()
 
@@ -135,12 +143,12 @@ class Ppo:
 
 
 class Actor(nn.Module):
-    def __init__(self, N_S, N_A):
+    def __init__(self, observation_size, action_size):
         super(Actor, self).__init__()
-        self.fc1 = nn.Linear(N_S, 64)
+        self.fc1 = nn.Linear(observation_size, 64)
         self.fc2 = nn.Linear(64, 64)
-        self.sigma = nn.Linear(64, N_A)
-        self.mu = nn.Linear(64, N_A)
+        self.sigma = nn.Linear(64, action_size)
+        self.mu = nn.Linear(64, action_size)
         self.mu.weight.data.mul_(0.1)
         self.mu.bias.data.mul_(0.0)
         # self.set_init([self.fc1,self.fc2, self.mu, self.sigma])
@@ -171,9 +179,9 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
-    def __init__(self, N_S):
+    def __init__(self, observation_size):
         super(Critic, self).__init__()
-        self.fc1 = nn.Linear(N_S, 64)
+        self.fc1 = nn.Linear(observation_size, 64)
         self.fc2 = nn.Linear(64, 64)
         self.fc3 = nn.Linear(64, 1)
         self.fc3.weight.data.mul_(0.1)
@@ -194,14 +202,14 @@ class Critic(nn.Module):
 
 # for normalizaing observation states
 class Normalize:
-    def __init__(self, N_S):
-        self.mean = np.zeros((N_S,))
-        self.std = np.zeros((N_S,))
-        self.stdd = np.zeros((N_S,))
+    def __init__(self, observation_size):
+        self.mean = jnp.zeros((observation_size,))
+        self.std = jnp.zeros((observation_size,))
+        self.stdd = jnp.zeros((observation_size,))
         self.n = 0
 
     def __call__(self, x):
-        x = np.asarray(x)
+        x = jnp.asarray(x)
         self.n += 1
         if self.n == 1:
             self.mean = x
@@ -210,7 +218,7 @@ class Normalize:
             self.mean = old_mean + (x - old_mean) / self.n
             self.stdd = self.stdd + (x - old_mean) * (x - self.mean)
         if self.n > 1:
-            self.std = np.sqrt(self.stdd / (self.n - 1))
+            self.std = jnp.sqrt(self.stdd / (self.n - 1))
         else:
             self.std = self.mean
 
@@ -218,14 +226,41 @@ class Normalize:
 
         x = x / (self.std + 1e-8)
 
-        x = np.clip(x, -5, +5)
+        x = jnp.clip(x, -5, +5)
 
         return x
 
 
+def unwrap_state_vectorization(state, config):
+    if config.num_envs == 1:
+        return state
+    # Get all attributes of the state
+    attributes = dir(state)
+
+    ne = getattr(state, "ne", 1)  # Default to 1 if not present
+    nl = state.nl
+    nefc = state.nefc
+    nf = state.nf
+
+    # Create a new state with the first element of each attribute
+    new_state = {}
+    for attr in attributes:
+        # Skip special methods and attributes
+        if not attr.startswith("_") and not callable(getattr(state, attr)) and attr not in ["ne", "nl", "nf", "nefc"]:
+            value = getattr(state, attr)
+            try:
+                if hasattr(value, "__getitem__"):
+                    new_state[attr] = value[0]
+                else:
+                    new_state[attr] = value
+            except:
+                print(f"Could not get first element of {attr}")
+    return type(state)(ne, nl, nefc, nf, **new_state)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env_name", type=str, default="Humanoid-v2", help="name of Mujoco environement")
+    parser.add_argument("--env_name", type=str, default="Humanoid-v2", help="name of environmnet to put into logs")
     parser.add_argument("--render", action="store_true", help="render the environment")
     parser.add_argument("--save_video", action="store_true", help="save video of the environment")
     parser.add_argument("--width", type=int, default=640, help="width of the video frame")
@@ -236,23 +271,30 @@ def main():
     config = Config()
 
     env = HumanoidEnv()
-    N_S = env.observation_size
-    N_A = env.action_size
-    print("N_A", N_A)
-    print("N_S", N_S)
+    observation_size = env.observation_size
+    action_size = env.action_size
+    print("action_size", action_size)
+    print("observation_size", observation_size)
 
-    reset_fn = jax.jit(env.reset)
-    step_fn = jax.jit(env.step)
-    # reset_fn = env.reset
-    # step_fn = env.step
+    @jax.jit
+    def reset_fn(rng):
+        rngs = jax.random.split(rng, config.num_envs)
+        return jax.vmap(env.reset)(rngs)
+
+    @jax.jit
+    def step_fn(states, actions):
+        return jax.vmap(env.step)(states, actions)
+
+    # reset_fn = jax.jit(env.reset)
+    # step_fn = jax.jit(env.step)
     rng = jax.random.PRNGKey(0)
 
     reset_fn(rng)
     torch.manual_seed(500)
     np.random.seed(500)
 
-    ppo = Ppo(N_S, N_A, config)
-    normalize = Normalize(N_S)
+    ppo = Ppo(observation_size, action_size, config)
+    normalize = Normalize(observation_size)
     episodes = 0
 
     for i in range(config.num_iterations):
@@ -264,36 +306,40 @@ def main():
         pbar = tqdm(total=config.max_steps_per_epoch, desc=f"Steps for epoch {i}")
 
         while steps < config.max_steps_per_epoch:
-            episodes += 1
+            episodes += config.num_envs
             # print(episodes)
 
-            state = reset_fn(rng)
-            s = jax.device_put(normalize(state.obs))
+            states = reset_fn(rng)
+            obs = jax.device_put(normalize(states.obs))
             score = 0
 
             # do as many episodes from random starting point
             for _ in range(config.max_steps):
-                steps += 1
-
-                a = ppo.actor_net.choose_action(torch.from_numpy(np.array(s).astype(np.float32)).unsqueeze(0))[0]
+                actions = ppo.actor_net.choose_action(torch.from_numpy(np.array(obs).astype(np.float32)).unsqueeze(0))[
+                    0
+                ]
 
                 # reward defined in environment
-                state = step_fn(state, a)
-                s_, r, done = state.obs, state.reward, state.done
-                s_ = jax.device_put(normalize(s_))
+                states = step_fn(states, actions)
+                next_obs, rewards, dones = states.obs, states.reward, states.done
 
-                # Capture frame for video if enabled
+                # Capture first environment for video if enabled
                 if args.save_video:
-                    rollout.append(state.pipeline_state)
+                    single_state = unwrap_state_vectorization(states.pipeline_state, config)
+                    rollout.append(single_state)
 
-                mask = (1 - done) * 1
-                # keeping track of all episodes to train with actor/critic
-                memory.append([s, a, r, mask])
+                masks = (1 - dones) * 1
+
+                # splitting for batches
+                for s, a, r, m, s_ in zip(obs, actions, rewards, masks, next_obs):
+                    # keeping track of all episodes to train with actor/critic
+                    memory.append([s, a, r, m])
 
                 score += r
-                s = s_
-                pbar.update(1)
-                if done.all():
+                obs = next_obs
+                steps += config.num_envs
+                pbar.update(config.num_envs)
+                if dones.all():
                     break
             with open("log_" + args.env_name + ".txt", "a") as outfile:
                 outfile.write("\t" + str(episodes) + "\t" + str(score) + "\n")
@@ -305,12 +351,12 @@ def main():
 
         # Save video for this iteration
         if args.save_video and rollout:
-            images = np.array(
+            images = jnp.array(
                 env.render(rollout[:: args.render_every], camera="side", width=args.width, height=args.height)
             )
             fps = int(1 / env.dt)
             print(f"Find video at video.mp4 with fps={fps}")
-            media.write_video(f"videos/video{i}.mp4", images, fps=fps)
+            media.write_video(f"videos/{args.env_name}_video{i}.mp4", images, fps=fps)
 
         ppo.train(memory, config)
 
