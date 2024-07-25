@@ -19,5 +19,6 @@ out*/
 *.stl
 *.txt
 
+videos/
 environments/
 scratch/
