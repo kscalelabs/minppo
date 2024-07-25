@@ -1,34 +1,32 @@
+"""Definition of base humanoids environment with reward system and termination conditions."""
+
 import os
-from typing import Any, Optional, TypedDict
+from typing import Any
 
 import jax
 import jax.numpy as jp
-import mujoco  # type: ignore
-from brax import base  # type: ignore
-from brax.envs.base import PipelineEnv, State  # type: ignore
-from brax.io import mjcf  # type: ignore
-from brax.mjx.base import State as MjxState  # type: ignore
+import mujoco  # type: ignore[import-untyped]
+from brax import base  # type: ignore[import-untyped]
+from brax.envs.base import PipelineEnv, State  # type: ignore[import-untyped]
+from brax.io import mjcf  # type: ignore[import-untyped]
+from brax.mjx.base import State as MjxState  # type: ignore[import-untyped]
 
 
 class HumanoidEnv(PipelineEnv):
     initial_qpos: jp.ndarray
     _action_size: int
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self) -> None:
         path: str = os.path.join(os.path.dirname(__file__), "environments", "stompy", "legs.xml")
         mj_model: mujoco.MjModel = mujoco.MjModel.from_xml_path(path)
-        mj_data: mujoco.MjData = mujoco.MjData(mj_model)
-        renderer: mujoco.Renderer = mujoco.Renderer(mj_model)
+        # mj_data: mujoco.MjData = mujoco.MjData(mj_model)
+        # renderer: mujoco.Renderer = mujoco.Renderer(mj_model)
         self.initial_qpos = jp.array(mj_model.keyframe("default").qpos)
         self._action_size = mj_model.nu
         sys: base.System = mjcf.load_model(mj_model)
 
         physics_steps_per_control_step: int = 4
-        kwargs = dict(kwargs)
-        kwargs["n_frames"] = kwargs.get("n_frames", physics_steps_per_control_step)
-        kwargs["backend"] = "mjx"
-
-        super().__init__(sys, **kwargs)
+        super().__init__(sys, n_frames=physics_steps_per_control_step, backend="mjx")
 
     def reset(self, rng: jp.ndarray) -> State:
         """Resets the environment to an initial state."""

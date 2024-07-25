@@ -1,17 +1,17 @@
 """Trains a policy network to get a humanoid to stand up."""
 
 import argparse
+import os
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, List, Tuple
 
 import jax
 import jax.numpy as jnp
-from flax import linen
 import mediapy as media
 import numpy as np
 import torch
-from brax.envs import State  # type: ignore
+from brax.envs import State  # type: ignore[import-untyped]
 from torch import nn, optim
 from tqdm import tqdm
 
@@ -23,7 +23,7 @@ class Config:
     lr_actor: float = field(default=0.0003)
     lr_critic: float = field(default=0.0003)
     num_iterations: int = field(default=15000)
-    num_envs: int = field(default=16)
+    num_envs: int = field(default=1)
     max_steps: int = field(default=10000)
     max_steps_per_epoch: int = field(default=8192)
     gamma: float = field(default=0.98)
@@ -180,8 +180,8 @@ class Actor(nn.Module):
     def choose_action(self, s: torch.Tensor) -> np.ndarray:
         # given a state, we do our forward pass and then sample from to maintain "random actions"
         mu, sigma = self.forward(s)
-        Pi = self.distribution(mu, sigma)
-        return Pi.sample().numpy()
+        pi = self.distribution(mu, sigma)
+        return pi.sample().numpy()
 
 
 class Critic(nn.Module):
@@ -255,9 +255,22 @@ def unwrap_state_vectorization(state: State, config: Config) -> State:
                     new_state[attr] = value[0]
                 else:
                     new_state[attr] = value
-            except:
+            except Exception:
                 print(f"Could not get first element of {attr}")
     return type(state)(ne, nl, nefc, nf, **new_state)
+
+
+# show "starting image" of xml for testing
+def screenshot(
+    env: HumanoidEnv, rng: jnp.ndarray, width: int = 640, height: int = 480, filename: str = "screenshot.png"
+) -> None:
+    state = env.reset(rng)
+    image_array = env.render(state.pipeline_state, camera="side", width=width, height=height)
+    image_array = jnp.array(image_array).astype("uint8")
+    os.makedirs("screenshots", exist_ok=True)
+    media.write_image(os.path.join("screenshots", filename), image_array)
+
+    print(f"Screenshot saved as {filename}")
 
 
 def main() -> None:
@@ -287,9 +300,10 @@ def main() -> None:
     def step_fn(states: State, actions: jax.Array) -> State:
         return jax.vmap(env.step)(states, actions)
 
-    # reset_fn = jax.jit(env.reset)
-    # step_fn = jax.jit(env.step)
     rng = jax.random.PRNGKey(0)
+
+    # screenshot(env, rng)
+    # return
 
     reset_fn(rng)
     torch.manual_seed(500)
