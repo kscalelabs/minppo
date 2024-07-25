@@ -1,35 +1,30 @@
 import os
-from typing import Optional, TypedDict
+from typing import Any, Optional, TypedDict
 
+import jax
 import jax.numpy as jp
-import mujoco
-from brax import base
-from brax.envs.base import PipelineEnv, State
-from brax.io import mjcf
-from brax.mjx.base import State as MjxState
-
-
-class EnvKwargs(TypedDict):
-    sys: base.System
-    backend: Optional[str]
-    n_frames: Optional[int]
-    debug: Optional[bool]
+import mujoco  # type: ignore
+from brax import base  # type: ignore
+from brax.envs.base import PipelineEnv, State  # type: ignore
+from brax.io import mjcf  # type: ignore
+from brax.mjx.base import State as MjxState  # type: ignore
 
 
 class HumanoidEnv(PipelineEnv):
-    def __init__(
-        self,
-        **kwargs,
-    ) -> None:
-        path = os.path.join(os.path.dirname(__file__), "environments", "stompy", "legs.xml")
-        mj_model = mujoco.MjModel.from_xml_path(path)
-        mj_data = mujoco.MjData(mj_model)
-        renderer = mujoco.Renderer(mj_model)
+    initial_qpos: jp.ndarray
+    _action_size: int
+
+    def __init__(self, **kwargs: Any) -> None:
+        path: str = os.path.join(os.path.dirname(__file__), "environments", "stompy", "legs.xml")
+        mj_model: mujoco.MjModel = mujoco.MjModel.from_xml_path(path)
+        mj_data: mujoco.MjData = mujoco.MjData(mj_model)
+        renderer: mujoco.Renderer = mujoco.Renderer(mj_model)
         self.initial_qpos = jp.array(mj_model.keyframe("default").qpos)
         self._action_size = mj_model.nu
-        sys = mjcf.load_model(mj_model)
-        # kwargs stuff
-        physics_steps_per_control_step = 4
+        sys: base.System = mjcf.load_model(mj_model)
+
+        physics_steps_per_control_step: int = 4
+        kwargs = dict(kwargs)
         kwargs["n_frames"] = kwargs.get("n_frames", physics_steps_per_control_step)
         kwargs["backend"] = "mjx"
 
@@ -41,60 +36,58 @@ class HumanoidEnv(PipelineEnv):
         qvel = jp.zeros(len(qpos) - 1)
 
         # initialize mjx state
-        mjx_state = self.pipeline_init(qpos, qvel)
-        obs = self.get_obs(mjx_state, jp.zeros(self._action_size))
+        state = self.pipeline_init(qpos, qvel)
+        obs = self.get_obs(state, jp.zeros(self._action_size))
         reward, done, zero = jp.zeros(3)
 
-        metrics = {}
+        metrics: dict[str, Any] = {}
 
-        return State(mjx_state, obs, reward, done, metrics)
+        return State(state, obs, reward, done, metrics)
 
-    def step(self, state: State, action: jp.ndarray) -> State:
+    def step(self, env_state: State, action: jp.ndarray) -> State:
         """Run one timestep of the environment's dynamics."""
-        mjx_state = state.pipeline_state
-        next_mjx_state = self.pipeline_step(mjx_state, action)
-        obs = self.get_obs(mjx_state, action)
+        state = env_state.pipeline_state
+        next_state = self.pipeline_step(state, action)
+        obs = self.get_obs(state, action)
 
         # Reward function: encourage standing
-        reward = self.compute_reward(next_mjx_state)
+        reward = self.compute_reward(state, next_state)
 
         # Termination condition
-        done = self.is_done(next_mjx_state)
+        done = self.is_done(next_state)
 
-        return state.replace(pipeline_state=next_mjx_state, obs=obs, reward=reward, done=done)
+        return env_state.replace(pipeline_state=next_state, obs=obs, reward=reward, done=done)
 
-    def compute_reward(self, mjx_state: MjxState) -> jp.ndarray:
+    def compute_reward(self, state: MjxState, next_state: MjxState) -> jp.ndarray:
         """Compute the reward for standing and height."""
-        # Get the height of the robot's center of mass
-        com_height = mjx_state.qpos[2]  # Assuming the 3rd element is the z-position
+        min_z, max_z = -0.35, 0
+        is_healthy = jp.where(state.q[2] < min_z, 0.0, 1.0)
+        is_healthy = jp.where(state.q[2] > max_z, 0.0, is_healthy)
 
-        # Set a threshold height for standing
-        min_standing_height = 0
+        xpos = state.subtree_com[1][1]
+        next_xpos = next_state.subtree_com[1][1]
+        velocity = (next_xpos - xpos) / self.dt
 
-        # Set a maximum expected height (you may need to adjust this based on your robot)
-        max_height = 0.8
+        jax.debug.print(
+            "velocity {}, xpos {}, next_xpos {}",
+            velocity,
+            xpos,
+            next_xpos,
+            ordered=True,
+        )
+        jax.debug.print("is_healthy {}, height {}", is_healthy, state.q[2], ordered=True)
 
-        # Reward for standing
-        standing_reward = jp.where(com_height > min_standing_height, 1.0, 0.0)
-
-        # Reward for height
-        # Normalize the height between min_standing_height and max_height
-        normalized_height = (com_height - min_standing_height) / (max_height - min_standing_height)
-        height_reward = jp.clip(normalized_height, 0.0, 1.0)
-
-        # Combine rewards
-        # You can adjust the weights to prioritize standing or height
-        total_reward = 0.7 * standing_reward + 0.3 * height_reward
+        total_reward = 5.0 * is_healthy + 1.25 * velocity
 
         return total_reward
 
     def is_done(self, mjx_state: MjxState) -> jp.ndarray:
         """Check if the episode should terminate."""
         # Get the height of the robot's center of mass
-        com_height = mjx_state.qpos[2]  # Assuming the 3rd element is the z-position
+        com_height = mjx_state.q[2]  # Assuming the 3rd element is the z-position
 
         # Set a termination threshold
-        termination_height = -0.5  # For example, 50% of the initial height
+        termination_height = -0.38  # For example, 50% of the initial height
 
         # Episode is done if the robot falls below the termination height
         done = jp.where(com_height < termination_height, 1.0, 0.0)

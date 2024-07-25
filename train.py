@@ -3,6 +3,7 @@
 import argparse
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Deque, List, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -10,7 +11,7 @@ from flax import linen
 import mediapy as media
 import numpy as np
 import torch
-from brax.envs import State
+from brax.envs import State  # type: ignore
 from torch import nn, optim
 from tqdm import tqdm
 
@@ -24,7 +25,7 @@ class Config:
     num_iterations: int = field(default=15000)
     num_envs: int = field(default=16)
     max_steps: int = field(default=10000)
-    max_steps_per_epoch: int = field(default=2048)
+    max_steps_per_epoch: int = field(default=8192)
     gamma: float = field(default=0.98)
     lambd: float = field(default=0.98)
     batch_size: int = field(default=64)
@@ -34,14 +35,14 @@ class Config:
 
 
 class Ppo:
-    def __init__(self, observation_size, action_size, config: Config) -> None:
+    def __init__(self, observation_size: int, action_size: int, config: Config) -> None:
         self.actor_net = Actor(observation_size, action_size)
         self.critic_net = Critic(observation_size)
         self.actor_optim = optim.Adam(self.actor_net.parameters(), lr=config.lr_actor)
         self.critic_optim = optim.Adam(self.critic_net.parameters(), lr=config.lr_critic, weight_decay=config.l2_rate)
         self.critic_loss_func = torch.nn.MSELoss()
 
-    def train(self, memory, config):
+    def train(self, memory: Deque[Tuple[np.ndarray, np.ndarray, float, float]], config: Config) -> None:
         states = torch.tensor(np.vstack([e[0] for e in memory]), dtype=torch.float32)
         actions = torch.tensor(np.array([e[1] for e in memory]), dtype=torch.float32)
         rewards = torch.tensor(np.array([e[2] for e in memory]), dtype=torch.float32)
@@ -107,7 +108,9 @@ class Ppo:
 
                 self.actor_optim.step()
 
-    def kl_divergence(self, old_mu, old_sigma, mu, sigma):
+    def kl_divergence(
+        self, old_mu: torch.Tensor, old_sigma: torch.Tensor, mu: torch.Tensor, sigma: torch.Tensor
+    ) -> torch.Tensor:
         old_mu = old_mu.detach()
         old_sigma = old_sigma.detach()
 
@@ -119,14 +122,17 @@ class Ppo:
         )
         return kl.sum(1, keepdim=True)
 
-    def get_gae(self, rewards, masks, values, config: Config):
+    def get_gae(
+        self, rewards: torch.Tensor, masks: torch.Tensor, values: torch.Tensor, config: Config
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         rewards = torch.Tensor(rewards)
         masks = torch.Tensor(masks)
         returns = torch.zeros_like(rewards)
         advants = torch.zeros_like(rewards)
-        running_returns = 0
-        previous_value = 0
-        running_advants = 0
+
+        running_returns = torch.zeros(1, device=values.device, dtype=values.dtype)
+        previous_value = torch.zeros(1, device=values.device, dtype=values.dtype)
+        running_advants = torch.zeros(1, device=values.device, dtype=values.dtype)
 
         # calculating reward, with sum of current reward and diminishing value of future rewards
         for t in reversed(range(0, len(rewards))):
@@ -143,7 +149,7 @@ class Ppo:
 
 
 class Actor(nn.Module):
-    def __init__(self, observation_size, action_size):
+    def __init__(self, observation_size: int, action_size: int) -> None:
         super(Actor, self).__init__()
         self.fc1 = nn.Linear(observation_size, 64)
         self.fc2 = nn.Linear(64, 64)
@@ -156,12 +162,12 @@ class Actor(nn.Module):
         # randomness to provide variation for next model inference so not limited to few actions
         self.distribution = torch.distributions.Normal
 
-    def set_init(self, layers):
+    def set_init(self, layers: List[nn.Module]) -> None:
         for layer in layers:
             nn.init.normal_(layer.weight, mean=0.0, std=0.1)
             nn.init.constant_(layer.bias, 0.0)
 
-    def forward(self, s):
+    def forward(self, s: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         x = torch.tanh(self.fc1(s))
         x = torch.tanh(self.fc2(x))
 
@@ -171,7 +177,7 @@ class Actor(nn.Module):
         sigma = torch.exp(log_sigma)
         return mu, sigma
 
-    def choose_action(self, s):
+    def choose_action(self, s: torch.Tensor) -> np.ndarray:
         # given a state, we do our forward pass and then sample from to maintain "random actions"
         mu, sigma = self.forward(s)
         Pi = self.distribution(mu, sigma)
@@ -179,21 +185,20 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
-    def __init__(self, observation_size):
+    def __init__(self, observation_size: int) -> None:
         super(Critic, self).__init__()
         self.fc1 = nn.Linear(observation_size, 64)
         self.fc2 = nn.Linear(64, 64)
         self.fc3 = nn.Linear(64, 1)
         self.fc3.weight.data.mul_(0.1)
         self.fc3.bias.data.mul_(0.0)
-        # self.set_init([self.fc1, self.fc2, self.fc2])
 
-    def set_init(self, layers):
+    def set_init(self, layers: List[nn.Module]) -> None:
         for layer in layers:
             nn.init.normal_(layer.weight, mean=0.0, std=0.1)
             nn.init.constant_(layer.bias, 0.0)
 
-    def forward(self, s):
+    def forward(self, s: torch.Tensor) -> torch.Tensor:
         x = torch.tanh(self.fc1(s))
         x = torch.tanh(self.fc2(x))
         returns = self.fc3(x)
@@ -202,13 +207,13 @@ class Critic(nn.Module):
 
 # for normalizaing observation states
 class Normalize:
-    def __init__(self, observation_size):
-        self.mean = jnp.zeros((observation_size,))
-        self.std = jnp.zeros((observation_size,))
-        self.stdd = jnp.zeros((observation_size,))
-        self.n = 0
+    def __init__(self, observation_size: int) -> None:
+        self.mean: jnp.ndarray = jnp.zeros((observation_size,))
+        self.std: jnp.ndarray = jnp.zeros((observation_size,))
+        self.stdd: jnp.ndarray = jnp.zeros((observation_size,))
+        self.n: int = 0
 
-    def __call__(self, x):
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         x = jnp.asarray(x)
         self.n += 1
         if self.n == 1:
@@ -223,15 +228,12 @@ class Normalize:
             self.std = self.mean
 
         x = x - self.mean
-
         x = x / (self.std + 1e-8)
-
         x = jnp.clip(x, -5, +5)
-
         return x
 
 
-def unwrap_state_vectorization(state, config):
+def unwrap_state_vectorization(state: State, config: Config) -> State:
     if config.num_envs == 1:
         return state
     # Get all attributes of the state
@@ -258,7 +260,7 @@ def unwrap_state_vectorization(state, config):
     return type(state)(ne, nl, nefc, nf, **new_state)
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--env_name", type=str, default="Humanoid-v2", help="name of environmnet to put into logs")
     parser.add_argument("--render", action="store_true", help="render the environment")
@@ -277,12 +279,12 @@ def main():
     print("observation_size", observation_size)
 
     @jax.jit
-    def reset_fn(rng):
+    def reset_fn(rng: jnp.ndarray) -> State:
         rngs = jax.random.split(rng, config.num_envs)
         return jax.vmap(env.reset)(rngs)
 
     @jax.jit
-    def step_fn(states, actions):
+    def step_fn(states: State, actions: jax.Array) -> State:
         return jax.vmap(env.step)(states, actions)
 
     # reset_fn = jax.jit(env.reset)
@@ -295,10 +297,11 @@ def main():
 
     ppo = Ppo(observation_size, action_size, config)
     normalize = Normalize(observation_size)
-    episodes = 0
+    episodes: int = 0
 
     for i in range(config.num_iterations):
-        memory = deque()
+        # memory of steps across all episodes in iteration
+        memory: Deque[Tuple[np.ndarray, np.ndarray, float, float]] = deque()
         scores = []
         steps = 0
         rollout = []
@@ -307,7 +310,6 @@ def main():
 
         while steps < config.max_steps_per_epoch:
             episodes += config.num_envs
-            # print(episodes)
 
             states = reset_fn(rng)
             obs = jax.device_put(normalize(states.obs))
@@ -333,7 +335,7 @@ def main():
                 # splitting for batches
                 for s, a, r, m, s_ in zip(obs, actions, rewards, masks, next_obs):
                     # keeping track of all episodes to train with actor/critic
-                    memory.append([s, a, r, m])
+                    memory.append((s, a, r, m))
 
                 score += r
                 obs = next_obs
@@ -341,11 +343,12 @@ def main():
                 pbar.update(config.num_envs)
                 if dones.all():
                     break
+
             with open("log_" + args.env_name + ".txt", "a") as outfile:
                 outfile.write("\t" + str(episodes) + "\t" + str(score) + "\n")
             scores.append(score)
 
-        score_avg = np.mean(scores)
+        score_avg: float = float(np.mean(scores))
         pbar.close()
         print("{} episode score is {:.2f}".format(episodes, score_avg))
 
