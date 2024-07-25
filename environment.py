@@ -21,7 +21,7 @@ class HumanoidEnv(PipelineEnv):
         self,
         **kwargs,
     ) -> None:
-        path = os.path.join(os.path.dirname(__file__), "stompy", "stompylegs.xml")
+        path = os.path.join(os.path.dirname(__file__), "environments", "stompy", "legs.xml")
         mj_model = mujoco.MjModel.from_xml_path(path)
         mj_data = mujoco.MjData(mj_model)
         renderer = mujoco.Renderer(mj_model)
@@ -81,7 +81,6 @@ class HumanoidEnv(PipelineEnv):
         # Normalize the height between min_standing_height and max_height
         normalized_height = (com_height - min_standing_height) / (max_height - min_standing_height)
         height_reward = jp.clip(normalized_height, 0.0, 1.0)
-        breakpoint()
 
         # Combine rewards
         # You can adjust the weights to prioritize standing or height

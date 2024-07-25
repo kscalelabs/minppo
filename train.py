@@ -37,7 +37,7 @@ class Ppo:
         self.critic_optim = optim.Adam(self.critic_net.parameters(), lr=config.lr_critic, weight_decay=config.l2_rate)
         self.critic_loss_func = torch.nn.MSELoss()
 
-    def train(self, memory):
+    def train(self, memory, config):
         states = torch.tensor(np.vstack([e[0] for e in memory]), dtype=torch.float32)
 
         actions = torch.tensor(np.array([e[1] for e in memory]), dtype=torch.float32)
@@ -48,7 +48,7 @@ class Ppo:
 
         # generalized advantage estimation for advantage
         # at a certain point based on immediate and future rewards
-        returns, advants = self.get_gae(rewards, masks, values)
+        returns, advants = self.get_gae(rewards, masks, values, config)
         old_mu, old_std = self.actor_net(states)
         pi = self.actor_net.distribution(old_mu, old_std)
 
@@ -58,8 +58,8 @@ class Ppo:
         arr = np.arange(n)
         for epoch in range(1):
             np.random.shuffle(arr)
-            for i in range(n // batch_size):
-                b_index = arr[batch_size * i : batch_size * (i + 1)]
+            for i in range(n // config.batch_size):
+                b_index = arr[config.batch_size * i : config.batch_size * (i + 1)]
                 b_states = states[b_index]
                 b_advants = advants[b_index].unsqueeze(1)
                 b_actions = actions[b_index]
@@ -85,7 +85,7 @@ class Ppo:
                 critic_loss.backward()
                 self.critic_optim.step()
 
-                ratio = torch.clamp(ratio, 1.0 - epsilon, 1.0 + epsilon)
+                ratio = torch.clamp(ratio, 1.0 - config.epsilon, 1.0 + config.epsilon)
 
                 clipped_loss = ratio * b_advants
                 actor_loss = -torch.min(surrogate_loss, clipped_loss).mean()
@@ -111,7 +111,7 @@ class Ppo:
         )
         return kl.sum(1, keepdim=True)
 
-    def get_gae(self, rewards, masks, values):
+    def get_gae(self, rewards, masks, values, config: Config):
         rewards = torch.Tensor(rewards)
         masks = torch.Tensor(masks)
         returns = torch.zeros_like(rewards)
@@ -122,9 +122,9 @@ class Ppo:
 
         # calculating reward, with sum of current reward and diminishing value of future rewards
         for t in reversed(range(0, len(rewards))):
-            running_returns = rewards[t] + gamma * running_returns * masks[t]
-            running_tderror = rewards[t] + gamma * previous_value * masks[t] - values.data[t]
-            running_advants = running_tderror + gamma * lambd * running_advants * masks[t]
+            running_returns = rewards[t] + config.gamma * running_returns * masks[t]
+            running_tderror = rewards[t] + config.gamma * previous_value * masks[t] - values.data[t]
+            running_advants = running_tderror + config.gamma * config.lambd * running_advants * masks[t]
 
             returns[t] = running_returns
             previous_value = values.data[t]
@@ -192,21 +192,6 @@ class Critic(nn.Module):
         return returns
 
 
-def state_to_flattened_array(state):
-    # Get all attributes of the state object
-    attributes = vars(state)
-    # Initialize an empty list to hold flattened arrays
-    flattened_arrays = []
-    for attr in attributes.values():
-        # Ensure the attribute is a NumPy array
-        np_attr = np.asarray(attr)
-        # Flatten the attribute and add it to the list
-        flattened_arrays.append(np_attr.flatten())
-    # Concatenate all flattened arrays into a single array
-    flattened_state = np.concatenate(flattened_arrays)
-    return flattened_state
-
-
 # for normalizaing observation states
 class Normalize:
     def __init__(self, N_S):
@@ -248,6 +233,8 @@ def main():
     parser.add_argument("--render_every", type=int, default=2, help="render the environment every N steps")
     args = parser.parse_args()
 
+    config = Config()
+
     env = HumanoidEnv()
     N_S = env.observation_size
     N_A = env.action_size
@@ -264,20 +251,19 @@ def main():
     torch.manual_seed(500)
     np.random.seed(500)
 
-    ppo = Ppo(N_S, N_A)
+    ppo = Ppo(N_S, N_A, config)
     normalize = Normalize(N_S)
     episodes = 0
-    eva_episodes = 0
 
-    for i in range(Iter):
+    for i in range(config.num_iterations):
         memory = deque()
         scores = []
         steps = 0
         rollout = []
 
-        pbar = tqdm(total=MAX_STEPS_PER_EPOCH, desc=f"Steps for epoch {i}")
+        pbar = tqdm(total=config.max_steps_per_epoch, desc=f"Steps for epoch {i}")
 
-        while steps < MAX_STEPS_PER_EPOCH:
+        while steps < config.max_steps_per_epoch:
             episodes += 1
             # print(episodes)
 
@@ -286,7 +272,7 @@ def main():
             score = 0
 
             # do as many episodes from random starting point
-            for _ in range(MAX_STEP):
+            for _ in range(config.max_steps):
                 steps += 1
 
                 a = ppo.actor_net.choose_action(torch.from_numpy(np.array(s).astype(np.float32)).unsqueeze(0))[0]
@@ -326,7 +312,7 @@ def main():
             print(f"Find video at video.mp4 with fps={fps}")
             media.write_video(f"videos/video{i}.mp4", images, fps=fps)
 
-        ppo.train(memory)
+        ppo.train(memory, config)
 
 
 if __name__ == "__main__":
