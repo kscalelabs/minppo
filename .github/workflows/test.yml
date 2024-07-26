@@ -49,7 +49,7 @@ jobs:
           black --diff --check *.py
           ruff check *.py
           mkdir -p .mypy_cache
-          mypy --cache-dir .mypy_cache --install-types *.py
+          mypy --cache-dir .mypy_cache --install-types --non-interactive *.py
 
       - name: Save cache
         uses: actions/cache/save@v3
