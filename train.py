@@ -30,7 +30,7 @@ class Config:
     num_iterations: int = field(default=15000)
     num_envs: int = field(default=16)
     max_steps: int = field(default=10000)
-    max_steps_per_epoch: int = field(default=16)
+    max_steps_per_epoch: int = field(default=8192)
     gamma: float = field(default=0.98)
     lambd: float = field(default=0.98)
     batch_size: int = field(default=64)
@@ -92,12 +92,12 @@ def train_step(actor_apply, critic_apply, actor_optim, critic_optim, params, sta
 
     actor_grad_fn = jax.value_and_grad(actor_loss_fn)
     actor_loss, actor_grads = actor_grad_fn(actor_params)
-    actor_updates, new_actor_opt_state = actor_optim.update(actor_grads, actor_opt_state)
+    actor_updates, new_actor_opt_state = actor_optim.update(actor_grads, actor_opt_state, actor_params)
     new_actor_params = optax.apply_updates(actor_params, actor_updates)
 
     critic_grad_fn = jax.value_and_grad(critic_loss_fn)
     critic_loss, critic_grads = critic_grad_fn(critic_params)
-    critic_updates, new_critic_opt_state = critic_optim.update(critic_grads, critic_opt_state)
+    critic_updates, new_critic_opt_state = critic_optim.update(critic_grads, critic_opt_state, critic_params)
     new_critic_params = optax.apply_updates(critic_params, critic_updates)
 
     new_params = {
@@ -110,7 +110,6 @@ def train_step(actor_apply, critic_apply, actor_optim, critic_optim, params, sta
     return new_params, actor_loss, critic_loss
 
 
-@jax.jit
 def get_gae(rewards, masks, values, config):
     def gae_step(carry, inp):
         gae, next_value = carry
