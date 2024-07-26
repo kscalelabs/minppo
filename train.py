@@ -8,7 +8,6 @@ from typing import Any, Callable, Dict, List, Mapping, Tuple
 
 import jax
 import jax.numpy as jnp
-from typing import cast
 import mediapy as media
 import numpy as np
 import optax
