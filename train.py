@@ -1,24 +1,20 @@
 """Trains a policy network to get a humanoid to stand up."""
 
 import argparse
-from functools import partial
 import os
-from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, List, Tuple
+from functools import partial
 
 import jax
 import jax.numpy as jnp
 import mediapy as media
 import numpy as np
-import torch
+import optax
 from brax.envs import State  # type: ignore[import-untyped]
-from jax import random
+from flax import linen as nn
 
 # from torch import nn, optim
 from tqdm import tqdm
-import optax
-from flax import linen as nn
 
 from environment import HumanoidEnv
 
@@ -76,15 +72,21 @@ def train_step(actor_apply, critic_apply, actor_optim, critic_optim, params, sta
     old_mu, old_std = actor_apply(actor_params, states)
     old_log_prob = actor_log_prob(old_mu, old_std, actions)
 
+    # maximizing advantage while minimizing change
     def actor_loss_fn(params):
         mu, std = actor_apply(params, states)
         new_log_prob = actor_log_prob(mu, std, actions)
+
+        # generally, we don't want our policy's output distribution
+        # to change too much between iterations
         ratio = jnp.exp(new_log_prob - old_log_prob)
         surrogate_loss = ratio * advants
+
         clipped_loss = jnp.clip(ratio, 1.0 - config.epsilon, 1.0 + config.epsilon) * advants
         actor_loss = -jnp.mean(jnp.minimum(surrogate_loss, clipped_loss))
         return actor_loss
 
+    # want the critic to best approximate rewards/returns
     def critic_loss_fn(params):
         critic_returns = critic_apply(params, states).squeeze()
         critic_loss = jnp.mean((critic_returns - returns) ** 2)
@@ -118,6 +120,7 @@ def get_gae(rewards, masks, values, config):
         gae = delta + config.gamma * config.lambd * mask * gae
         return (gae, value), gae
 
+    # calculating reward, with combination of immediate reward and diminishing value of future rewards
     _, advantages = jax.lax.scan(
         f=gae_step,
         init=(jnp.zeros_like(rewards[-1]), values[-1]),
@@ -130,6 +133,9 @@ def get_gae(rewards, masks, values, config):
 
 
 def train(ppo, memory, config):
+
+    # NOTE: think this needs to be reimplemented for vecotization because currently,
+    # doesn't account that memory order is maintained
     states = jnp.array([e[0] for e in memory])
     actions = jnp.array([e[1] for e in memory])
     rewards = jnp.array([e[2] for e in memory])
@@ -165,120 +171,6 @@ def train(ppo, memory, config):
             ppo.update_params(new_params)
 
 
-# class Ppo:
-#     def __init__(self, observation_size: int, action_size: int, config: Config) -> None:
-#         self.actor_net = Actor(observation_size, action_size)
-#         self.critic_net = Critic(observation_size)
-#         self.actor_optim = optim.Adam(self.actor_net.parameters(), lr=config.lr_actor)
-#         self.critic_optim = optim.Adam(self.critic_net.parameters(), lr=config.lr_critic, weight_decay=config.l2_rate)
-#         self.critic_loss_func = torch.nn.MSELoss()
-
-#     def train(self, memory: Deque[Tuple[np.ndarray, np.ndarray, float, float]], config: Config) -> None:
-#         states = torch.tensor(np.vstack([e[0] for e in memory]), dtype=torch.float32)
-#         actions = torch.tensor(np.array([e[1] for e in memory]), dtype=torch.float32)
-#         rewards = torch.tensor(np.array([e[2] for e in memory]), dtype=torch.float32)
-#         masks = torch.tensor(np.array([e[3] for e in memory]), dtype=torch.float32)
-
-#         # parallelization for many devices -- requires models to be jax-compatible
-#         # num_devices = jax.device_count()
-#         # if num_devices > 1:
-#         #     self.actor_net = jax.pmap(self.actor_net)
-#         #     self.critic_net = jax.pmap(self.critic_net)
-
-#         values = self.critic_net(states)
-
-#         # generalized advantage estimation for advantage
-#         # at a certain point based on immediate and future rewards
-#         returns, advants = self.get_gae(rewards, masks, values, config)
-#         old_mu, old_std = self.actor_net(states)
-#         pi = self.actor_net.distribution(old_mu, old_std)
-
-#         old_log_prob = pi.log_prob(actions).sum(1, keepdim=True)
-
-#         n = len(states)
-#         arr = np.arange(n)
-#         for epoch in range(1):
-#             np.random.shuffle(arr)
-#             for i in range(n // config.batch_size):
-#                 b_index = arr[config.batch_size * i : config.batch_size * (i + 1)]
-#                 b_states = states[b_index]
-#                 b_advants = advants[b_index].unsqueeze(1)
-#                 b_actions = actions[b_index]
-#                 b_returns = returns[b_index].unsqueeze(1)
-
-#                 mu, std = self.actor_net(b_states)
-#                 pi = self.actor_net.distribution(mu, std)
-
-#                 # generally, we don't want our policy's output distribution
-#                 # to change too much between iterations
-#                 new_prob = pi.log_prob(b_actions).sum(1, keepdim=True)
-#                 old_prob = old_log_prob[b_index].detach()
-#                 ratio = torch.exp(new_prob - old_prob)
-
-#                 surrogate_loss = ratio * b_advants
-#                 critic_returns = self.critic_net(b_states)
-
-#                 # want the critic to best approximate rewards/returns
-#                 # so can evaluate how poor actor's actions are
-#                 critic_loss = self.critic_loss_func(critic_returns, b_returns)
-
-#                 self.critic_optim.zero_grad()
-#                 critic_loss.backward()
-#                 self.critic_optim.step()
-
-#                 ratio = torch.clamp(ratio, 1.0 - config.epsilon, 1.0 + config.epsilon)
-
-#                 clipped_loss = ratio * b_advants
-#                 actor_loss = -torch.min(surrogate_loss, clipped_loss).mean()
-
-#                 # KL_penalty = self.kl_divergence(old_mu[b_index],old_std[b_index],mu,std)
-#                 # actor_loss = -(surrogate_loss-beta*KL_penalty).mean()
-
-#                 self.actor_optim.zero_grad()
-#                 actor_loss.backward()
-
-#                 self.actor_optim.step()
-
-#     def kl_divergence(
-#         self, old_mu: torch.Tensor, old_sigma: torch.Tensor, mu: torch.Tensor, sigma: torch.Tensor
-#     ) -> torch.Tensor:
-#         old_mu = old_mu.detach()
-#         old_sigma = old_sigma.detach()
-
-#         kl = (
-#             torch.log(old_sigma)
-#             - torch.log(sigma)
-#             + (old_sigma.pow(2) + (old_mu - mu).pow(2)) / (2.0 * sigma.pow(2))
-#             - 0.5
-#         )
-#         return kl.sum(1, keepdim=True)
-
-#     def get_gae(
-#         self, rewards: torch.Tensor, masks: torch.Tensor, values: torch.Tensor, config: Config
-#     ) -> Tuple[torch.Tensor, torch.Tensor]:
-#         rewards = torch.Tensor(rewards)
-#         masks = torch.Tensor(masks)
-#         returns = torch.zeros_like(rewards)
-#         advants = torch.zeros_like(rewards)
-
-#         running_returns = torch.zeros(1, device=values.device, dtype=values.dtype)
-#         previous_value = torch.zeros(1, device=values.device, dtype=values.dtype)
-#         running_advants = torch.zeros(1, device=values.device, dtype=values.dtype)
-
-#         # calculating reward, with combination of immediate reward and diminishing value of future rewards
-#         for t in reversed(range(len(rewards))):
-#             running_returns = rewards[t] + config.gamma * running_returns * masks[t]
-#             running_tderror = rewards[t] + config.gamma * previous_value * masks[t] - values.data[t]
-#             running_advants = running_tderror + config.gamma * config.lambd * running_advants * masks[t]
-
-#             returns[t] = running_returns
-#             previous_value = values.data[t]
-#             advants[t] = running_advants
-
-#         advants = (advants - advants.mean()) / advants.std()
-#         return returns, advants
-
-
 def actor_log_prob(mu, sigma, actions):
     return jax.scipy.stats.norm.logpdf(actions, mu, sigma).sum(axis=-1)
 
@@ -305,63 +197,6 @@ class Critic(nn.Module):
         x = nn.tanh(nn.Dense(64)(x))
         x = nn.tanh(nn.Dense(64)(x))
         return nn.Dense(1, kernel_init=nn.initializers.constant(0.1))(x)
-
-
-# class Actor(nn.Module):
-#     def __init__(self, observation_size: int, action_size: int) -> None:
-#         super(Actor, self).__init__()
-#         self.fc1 = nn.Linear(observation_size, 64)
-#         self.fc2 = nn.Linear(64, 64)
-#         self.sigma = nn.Linear(64, action_size)
-#         self.mu = nn.Linear(64, action_size)
-#         self.mu.weight.data.mul_(0.1)
-#         self.mu.bias.data.mul_(0.0)
-#         # self.set_init([self.fc1,self.fc2, self.mu, self.sigma])
-
-#         # randomness to provide variation for next model inference so not limited to few actions
-#         self.distribution = torch.distributions.Normal
-
-#     def set_init(self, layers: List[nn.Module]) -> None:
-#         for layer in layers:
-#             nn.init.normal_(layer.weight, mean=0.0, std=0.1)
-#             nn.init.constant_(layer.bias, 0.0)
-
-#     def forward(self, s: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-#         x = torch.tanh(self.fc1(s))
-#         x = torch.tanh(self.fc2(x))
-
-#         mu = self.mu(x)
-#         log_sigma = self.sigma(x)
-#         # log_sigma = torch.zeros_like(mu)
-#         sigma = torch.exp(log_sigma)
-#         return mu, sigma
-
-#     def choose_action(self, s: torch.Tensor) -> np.ndarray:
-#         # given a state, we do our forward pass and then sample from to maintain "random actions"
-#         mu, sigma = self.forward(s)
-#         pi = self.distribution(mu, sigma)
-#         return pi.sample().numpy()
-
-
-# class Critic(nn.Module):
-#     def __init__(self, observation_size: int) -> None:
-#         super(Critic, self).__init__()
-#         self.fc1 = nn.Linear(observation_size, 64)
-#         self.fc2 = nn.Linear(64, 64)
-#         self.fc3 = nn.Linear(64, 1)
-#         self.fc3.weight.data.mul_(0.1)
-#         self.fc3.bias.data.mul_(0.0)
-
-#     def set_init(self, layers: List[nn.Module]) -> None:
-#         for layer in layers:
-#             nn.init.normal_(layer.weight, mean=0.0, std=0.1)
-#             nn.init.constant_(layer.bias, 0.0)
-
-#     def forward(self, s: torch.Tensor) -> torch.Tensor:
-#         x = torch.tanh(self.fc1(s))
-#         x = torch.tanh(self.fc2(x))
-#         returns = self.fc3(x)
-#         return returns
 
 
 # for normalizaing observation states
@@ -441,6 +276,18 @@ def screenshot(
     print(f"Screenshot saved as {filename}")
 
 
+@partial(jax.jit, static_argnums=(2,))
+def choose_action(actor_params, obs, actor):
+    # given a state, we do our forward pass and then sample from to maintain "random actions"
+    mu, sigma = actor.apply(actor_params, obs)
+    return actor_distribution(mu, sigma)
+
+
+@jax.jit
+def update_memory(memory, new_data):
+    return jax.tree.map(lambda x, y: jnp.concatenate([x, y]), memory, new_data)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--env_name", type=str, default="Humanoid-v2", help="name of environmnet to put into logs")
@@ -475,21 +322,11 @@ def main() -> None:
     # return
 
     reset_fn(rng)
-    torch.manual_seed(500)
     np.random.seed(500)
 
     ppo = Ppo(observation_size, action_size, config, rng)
     normalize = Normalize(observation_size)
     episodes: int = 0
-
-    @partial(jax.jit, static_argnums=(2,))
-    def choose_action(actor_params, obs, actor):
-        mu, sigma = actor.apply(actor_params, obs)
-        return actor_distribution(mu, sigma)
-
-    @jax.jit
-    def update_memory(memory, new_data):
-        return jax.tree.map(lambda x, y: jnp.concatenate([x, y]), memory, new_data)
 
     for i in range(1, config.num_iterations + 1):
         # Initialize memory as JAX arrays
