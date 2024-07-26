@@ -1,13 +1,13 @@
 # requirements.txt
 
 # Training
-torch
-torchvision
 tqdm
 
 # Environment
 jax
 brax
+optax
+flax
 mediapy
 
 # Configuration management.
