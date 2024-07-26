@@ -4,16 +4,18 @@ import argparse
 import os
 from dataclasses import dataclass, field
 from functools import partial
+from typing import Any, Callable, Dict, List, Mapping, Tuple
 
 import jax
 import jax.numpy as jnp
+from typing import cast
 import mediapy as media
 import numpy as np
 import optax
-from brax.envs import State  # type: ignore[import-untyped]
+from brax.envs import State
+from brax.mjx.base import State as MjxState
 from flax import linen as nn
-
-# from torch import nn, optim
+from jax import Array
 from tqdm import tqdm
 
 from environment import HumanoidEnv
@@ -26,7 +28,7 @@ class Config:
     num_iterations: int = field(default=15000)
     num_envs: int = field(default=16)
     max_steps: int = field(default=10000)
-    max_steps_per_epoch: int = field(default=8192)
+    max_steps_per_epoch: int = field(default=16384)
     gamma: float = field(default=0.98)
     lambd: float = field(default=0.98)
     batch_size: int = field(default=64)
@@ -36,7 +38,7 @@ class Config:
 
 
 class Ppo:
-    def __init__(self, observation_size: int, action_size: int, config: Config, key: jnp.ndarray):
+    def __init__(self, observation_size: int, action_size: int, config: Config, key: Array) -> None:
         self.actor = Actor(action_size)
         self.critic = Critic()
         self.actor_params = self.actor.init(key, jnp.zeros((1, observation_size)))
@@ -48,7 +50,7 @@ class Ppo:
         self.actor_opt_state = self.actor_optim.init(self.actor_params)
         self.critic_opt_state = self.critic_optim.init(self.critic_params)
 
-    def get_params(self):
+    def get_params(self) -> Dict[str, Any]:
         return {
             "actor_params": self.actor_params,
             "critic_params": self.critic_params,
@@ -56,14 +58,25 @@ class Ppo:
             "critic_opt_state": self.critic_opt_state,
         }
 
-    def update_params(self, new_params):
+    def update_params(self, new_params: Dict[str, Any]) -> None:
         self.actor_params = new_params["actor_params"]
         self.critic_params = new_params["critic_params"]
         self.actor_opt_state = new_params["actor_opt_state"]
         self.critic_opt_state = new_params["critic_opt_state"]
 
 
-def train_step(actor_apply, critic_apply, actor_optim, critic_optim, params, states, actions, rewards, masks, config):
+def train_step(
+    actor_apply: Callable[[Any, Array], Tuple[Array, Array]],
+    critic_apply: Callable[[Any, Array], Array],
+    actor_optim: optax.GradientTransformation,
+    critic_optim: optax.GradientTransformation,
+    params: Dict[str, Any],
+    states: Array,
+    actions: Array,
+    rewards: Array,
+    masks: Array,
+    config: Config,
+) -> Tuple[Dict[str, Any], Array, Array]:
     actor_params, critic_params, actor_opt_state, critic_opt_state = params.values()
 
     values = critic_apply(critic_params, states).squeeze()
@@ -73,7 +86,7 @@ def train_step(actor_apply, critic_apply, actor_optim, critic_optim, params, sta
     old_log_prob = actor_log_prob(old_mu, old_std, actions)
 
     # maximizing advantage while minimizing change
-    def actor_loss_fn(params):
+    def actor_loss_fn(params: Array) -> Array:
         mu, std = actor_apply(params, states)
         new_log_prob = actor_log_prob(mu, std, actions)
 
@@ -87,7 +100,7 @@ def train_step(actor_apply, critic_apply, actor_optim, critic_optim, params, sta
         return actor_loss
 
     # want the critic to best approximate rewards/returns
-    def critic_loss_fn(params):
+    def critic_loss_fn(params: Array) -> Array:
         critic_returns = critic_apply(params, states).squeeze()
         critic_loss = jnp.mean((critic_returns - returns) ** 2)
         return critic_loss
@@ -112,8 +125,8 @@ def train_step(actor_apply, critic_apply, actor_optim, critic_optim, params, sta
     return new_params, actor_loss, critic_loss
 
 
-def get_gae(rewards, masks, values, config):
-    def gae_step(carry, inp):
+def get_gae(rewards: Array, masks: Array, values: Array, config: Config) -> Tuple[Array, Array]:
+    def gae_step(carry: Tuple[Array, Array], inp: Tuple[Array, Array, Array]) -> Tuple[Tuple[Array, Array], Array]:
         gae, next_value = carry
         reward, mask, value = inp
         delta = reward + config.gamma * next_value * mask - value
@@ -132,8 +145,7 @@ def get_gae(rewards, masks, values, config):
     return returns, advantages
 
 
-def train(ppo, memory, config):
-
+def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Config) -> None:
     # NOTE: think this needs to be reimplemented for vecotization because currently,
     # doesn't account that memory order is maintained
     states = jnp.array([e[0] for e in memory])
@@ -157,8 +169,8 @@ def train(ppo, memory, config):
 
             params = ppo.get_params()
             new_params, actor_loss, critic_loss = train_step(
-                ppo.actor.apply,
-                ppo.critic.apply,
+                ppo.actor.apply,  # type: ignore[arg-type]
+                ppo.critic.apply,  # type: ignore[arg-type]
                 ppo.actor_optim,
                 ppo.critic_optim,
                 params,
@@ -171,11 +183,11 @@ def train(ppo, memory, config):
             ppo.update_params(new_params)
 
 
-def actor_log_prob(mu, sigma, actions):
+def actor_log_prob(mu: Array, sigma: Array, actions: Array) -> Array:
     return jax.scipy.stats.norm.logpdf(actions, mu, sigma).sum(axis=-1)
 
 
-def actor_distribution(mu, sigma):
+def actor_distribution(mu: Array, sigma: Array) -> Array:
     return jax.random.normal(jax.random.PRNGKey(0), shape=mu.shape) * sigma + mu
 
 
@@ -183,7 +195,7 @@ class Actor(nn.Module):
     action_size: int
 
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x: Array) -> Tuple[Array, Array]:
         x = nn.tanh(nn.Dense(64)(x))
         x = nn.tanh(nn.Dense(64)(x))
         mu = nn.Dense(self.action_size, kernel_init=nn.initializers.constant(0.1))(x)
@@ -193,7 +205,7 @@ class Actor(nn.Module):
 
 class Critic(nn.Module):
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x: Array) -> Array:
         x = nn.tanh(nn.Dense(64)(x))
         x = nn.tanh(nn.Dense(64)(x))
         return nn.Dense(1, kernel_init=nn.initializers.constant(0.1))(x)
@@ -202,12 +214,12 @@ class Critic(nn.Module):
 # for normalizaing observation states
 class Normalize:
     def __init__(self, observation_size: int) -> None:
-        self.mean: jnp.ndarray = jnp.zeros((observation_size,))
-        self.std: jnp.ndarray = jnp.zeros((observation_size,))
-        self.stdd: jnp.ndarray = jnp.zeros((observation_size,))
+        self.mean: Array = jnp.zeros((observation_size,))
+        self.std: Array = jnp.zeros((observation_size,))
+        self.stdd: Array = jnp.zeros((observation_size,))
         self.n: int = 0
 
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+    def __call__(self, x: Array) -> Array:
         x = jnp.asarray(x)
         self.n += 1
         if self.n == 1:
@@ -265,7 +277,11 @@ def unwrap_state_vectorization(state: State, config: Config) -> State:
 
 # show "starting image" of xml for testing
 def screenshot(
-    env: HumanoidEnv, rng: jnp.ndarray, width: int = 640, height: int = 480, filename: str = "screenshot.png"
+    env: HumanoidEnv,
+    rng: Array,
+    width: int = 640,
+    height: int = 480,
+    filename: str = "screenshot.png",
 ) -> None:
     state = env.reset(rng)
     image_array = env.render(state.pipeline_state, camera="side", width=width, height=height)
@@ -277,14 +293,14 @@ def screenshot(
 
 
 @partial(jax.jit, static_argnums=(2,))
-def choose_action(actor_params, obs, actor):
+def choose_action(actor_params: Mapping[str, Mapping[str, Any]], obs: Array, actor: Actor) -> Array:
     # given a state, we do our forward pass and then sample from to maintain "random actions"
     mu, sigma = actor.apply(actor_params, obs)
-    return actor_distribution(mu, sigma)
+    return actor_distribution(mu, sigma)  # type: ignore[arg-type]
 
 
 @jax.jit
-def update_memory(memory, new_data):
+def update_memory(memory: Dict[str, Array], new_data: Dict[str, Array]) -> Dict[str, Array]:
     return jax.tree.map(lambda x, y: jnp.concatenate([x, y]), memory, new_data)
 
 
@@ -308,7 +324,7 @@ def main() -> None:
     print("observation_size", observation_size)
 
     @jax.jit
-    def reset_fn(rng: jnp.ndarray) -> State:
+    def reset_fn(rng: Array) -> State:
         rngs = jax.random.split(rng, config.num_envs)
         return jax.vmap(env.reset)(rngs)
 
@@ -338,7 +354,7 @@ def main() -> None:
         }
         scores = []
         steps = 0
-        rollout = []
+        rollout: List[MjxState] = []
 
         pbar = tqdm(total=config.max_steps_per_epoch, desc=f"Steps for iteration {i}")
 
@@ -382,7 +398,7 @@ def main() -> None:
                 outfile.write("\t" + str(episodes) + "\t" + str(jnp.mean(score)) + "\n")
             scores.append(jnp.mean(score))
 
-        score_avg = jnp.mean(jnp.array(scores))
+        score_avg = float(jnp.mean(jnp.array(scores)))
         pbar.close()
         print("{} episode score is {:.2f}".format(episodes, score_avg))
 

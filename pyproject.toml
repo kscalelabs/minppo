@@ -28,6 +28,9 @@ plugins = ["numpy.typing.mypy_plugin"]
 [[tool.mypy.overrides]]
 
 module = [
+    "brax.*",
+    "optax.*",
+    "mujoco.*",
     "torchaudio.*",
     "torchvision.*",
 ]

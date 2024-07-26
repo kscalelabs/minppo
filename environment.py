@@ -3,13 +3,12 @@
 import os
 from typing import Any
 
-import jax
 import jax.numpy as jp
-import mujoco  # type: ignore[import-untyped]
-from brax import base  # type: ignore[import-untyped]
-from brax.envs.base import PipelineEnv, State  # type: ignore[import-untyped]
-from brax.io import mjcf  # type: ignore[import-untyped]
-from brax.mjx.base import State as MjxState  # type: ignore[import-untyped]
+import mujoco
+from brax import base
+from brax.envs.base import PipelineEnv, State
+from brax.io import mjcf
+from brax.mjx.base import State as MjxState
 
 
 class HumanoidEnv(PipelineEnv):
@@ -58,22 +57,22 @@ class HumanoidEnv(PipelineEnv):
 
     def compute_reward(self, state: MjxState, next_state: MjxState) -> jp.ndarray:
         """Compute the reward for standing and height."""
-        min_z, max_z = -0.35, 0
-        is_healthy = jp.where(state.q[2] < min_z, 0.0, 1.0)
-        is_healthy = jp.where(state.q[2] > max_z, 0.0, is_healthy)
+        min_z, max_z = -0.345, 0
+        is_healthy = jp.where(state.qpos[2] < min_z, 0.0, 1.0)
+        is_healthy = jp.where(state.qpos[2] > max_z, 0.0, is_healthy)
 
         xpos = state.subtree_com[1][1]
         next_xpos = next_state.subtree_com[1][1]
         velocity = (next_xpos - xpos) / self.dt
 
-        jax.debug.print(
-            "velocity {}, xpos {}, next_xpos {}",
-            velocity,
-            xpos,
-            next_xpos,
-            ordered=True,
-        )
-        jax.debug.print("is_healthy {}, height {}", is_healthy, state.q[2], ordered=True)
+        # jax.debug.print(
+        #     "velocity {}, xpos {}, next_xpos {}",
+        #     velocity,
+        #     xpos,
+        #     next_xpos,
+        #     ordered=True,
+        # )
+        # jax.debug.print("is_healthy {}, height {}", is_healthy, state.q[2], ordered=True)
 
         total_reward = 5.0 * is_healthy + 1.25 * velocity
 
@@ -82,10 +81,10 @@ class HumanoidEnv(PipelineEnv):
     def is_done(self, mjx_state: MjxState) -> jp.ndarray:
         """Check if the episode should terminate."""
         # Get the height of the robot's center of mass
-        com_height = mjx_state.q[2]  # Assuming the 3rd element is the z-position
+        com_height = mjx_state.qpos[2]  # Assuming the 3rd element is the z-position
 
         # Set a termination threshold
-        termination_height = -0.38  # For example, 50% of the initial height
+        termination_height = -0.35  # For example, 50% of the initial height
 
         # Episode is done if the robot falls below the termination height
         done = jp.where(com_height < termination_height, 1.0, 0.0)
