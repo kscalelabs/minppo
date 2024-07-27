@@ -18,6 +18,7 @@ dist/
 out*/
 *.stl
 *.txt
+*.pkl
 
 videos/
 environments/

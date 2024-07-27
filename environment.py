@@ -19,7 +19,7 @@ class HumanoidEnv(PipelineEnv):
         path: str = os.path.join(os.path.dirname(__file__), "environments", "stompy", "legs.xml")
         mj_model: mujoco.MjModel = mujoco.MjModel.from_xml_path(path)
         # mj_data: mujoco.MjData = mujoco.MjData(mj_model)
-        # renderer: mujoco.Renderer = mujoco.Renderer(mj_model)
+        renderer: mujoco.Renderer = mujoco.Renderer(mj_model)
         self.initial_qpos = jp.array(mj_model.keyframe("default").qpos)
         self._action_size = mj_model.nu
         sys: base.System = mjcf.load_model(mj_model)
@@ -57,7 +57,7 @@ class HumanoidEnv(PipelineEnv):
 
     def compute_reward(self, state: MjxState, next_state: MjxState) -> jp.ndarray:
         """Compute the reward for standing and height."""
-        min_z, max_z = -0.345, 0
+        min_z, max_z = -0.45, 2.0
         is_healthy = jp.where(state.qpos[2] < min_z, 0.0, 1.0)
         is_healthy = jp.where(state.qpos[2] > max_z, 0.0, is_healthy)
 
@@ -84,7 +84,7 @@ class HumanoidEnv(PipelineEnv):
         com_height = mjx_state.qpos[2]  # Assuming the 3rd element is the z-position
 
         # Set a termination threshold
-        termination_height = -0.35  # For example, 50% of the initial height
+        termination_height = -0.45  # For example, 50% of the initial height
 
         # Episode is done if the robot falls below the termination height
         done = jp.where(com_height < termination_height, 1.0, 0.0)
