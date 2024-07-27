@@ -20,15 +20,13 @@ from tqdm import tqdm
 
 from environment import HumanoidEnv
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
-
 
 @dataclass
 class Config:
     lr_actor: float = field(default=0.0003)
     lr_critic: float = field(default=0.0003)
     num_iterations: int = field(default=20)
-    num_envs: int = field(default=32)  # if too high, can just end up not finishing episodes (especially in rollout)
+    num_envs: int = field(default=16)  # if too high, can just end up not finishing episodes (especially in rollout)
     max_steps: int = field(default=100000)
     max_steps_per_epoch: int = field(default=2048)
     gamma: float = field(default=0.98)
@@ -47,6 +45,7 @@ class Ppo:
         self.actor_params = self.actor.init(key, jnp.zeros((1, observation_size)))
         self.critic_params = self.critic.init(key, jnp.zeros((1, observation_size)))
 
+        # 
         self.actor_apply = jax.jit(lambda params, x: self.actor.apply(params, x))
         self.critic_apply = jax.jit(lambda params, x: self.critic.apply(params, x))
 
@@ -379,7 +378,7 @@ def screenshot(
     print(f"Screenshot saved as {filename}")
 
 
-def unwrap_state_vectorization(state: State, envs_to_sample: int) -> State:
+def unwrap_state_vectorization_parallelization(state: State, envs_to_sample: int) -> State:
     unwrapped_rollout = []
     # Get all attributes of the state
     attributes = dir(state)
@@ -391,7 +390,8 @@ def unwrap_state_vectorization(state: State, envs_to_sample: int) -> State:
 
     # NOTE: can change ordering of this to save runtime if want to save more vectorized states.
     # saves from only first vectorized state
-    for i in range(envs_to_sample):
+    for env in range(envs_to_sample):
+        i, j = divmod(env, ne)
         # Create a new state with the first element of each attribute
         new_state = {}
         for attr in attributes:
@@ -404,7 +404,7 @@ def unwrap_state_vectorization(state: State, envs_to_sample: int) -> State:
                 value = getattr(state, attr)
                 try:
                     if hasattr(value, "__getitem__"):
-                        new_state[attr] = value[i]
+                        new_state[attr] = value[j][i]
                     else:
                         new_state[attr] = value
                 except Exception:
@@ -427,18 +427,19 @@ def update_memory(memory, new_data):
         concat = jnp.concatenate([x, y])
         return concat
 
-    return jax.tree_map(concat_and_reshape, memory, new_data)
+    return jax.tree.map(concat_and_reshape, memory, new_data)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env_name", type=str, default="base", help="name of environmnet to put into logs")
-    parser.add_argument("--save_video", action="store_true", help="whether to save a video")
-    parser.add_argument("--render", action="store_true", help="render the environment")
-    parser.add_argument("--width", type=int, default=640, help="width of the video frame")
-    parser.add_argument("--height", type=int, default=480, help="height of the video frame")
-    parser.add_argument("--render_every", type=int, default=2, help="render the environment every N steps")
-    parser.add_argument("--video_length", type=int, default=5, help="maxmimum length of video in seconds")
+    parser.add_argument("-n", "--env_name", type=str, default="base", help="name of environmnet to put into logs")
+    parser.add_argument("-ps", "--parallelize_sim", action="store_true", help="parallelize simulations across GPUs")
+    parser.add_argument("-v", "--save_video", action="store_true", help="whether to save a video")
+    parser.add_argument("-r", "--render", action="store_true", help="render the environment")
+    parser.add_argument("-x", "--width", type=int, default=640, help="width of the video frame")
+    parser.add_argument("-y", "--height", type=int, default=480, help="height of the video frame")
+    parser.add_argument("-re", "--render_every", type=int, default=2, help="render the environment every N steps")
+    parser.add_argument("-vl", "--video_length", type=int, default=5, help="maxmimum length of video in seconds")
     parser.add_argument("--envs_to_sample", type=int, default=4, help="number of environments to sample for video")
     parser.add_argument("--save_video_every", type=int, default=1, help="save video every N iterations")
     args = parser.parse_args()
@@ -453,21 +454,11 @@ def main() -> None:
     print("action_size", action_size)
     print("observation_size", observation_size)
 
-    @jax.jit
-    def reset_fn(rng: Array) -> State:
-        rngs = jax.random.split(rng, config.num_envs)
-        return jax.vmap(env.reset)(rngs)
-
-    @jax.jit
-    def step_fn(states: State, actions: jax.Array) -> State:
-        return jax.vmap(env.step)(states, actions)
-
     rng = jax.random.PRNGKey(0)
 
     # screenshot(env, rng)
     # return
 
-    reset_fn(rng)
     np.random.seed(500)
 
     ppo = Ppo(observation_size, action_size, config, rng)
@@ -486,10 +477,6 @@ def main() -> None:
     @partial(jax.pmap, axis_name="devices")
     def pmap_step_fn(states, actions):
         return jax.vmap(env.step)(states, actions)
-
-    @partial(jax.pmap, axis_name="devices")
-    def pmap_choose_action(actor_params, obs, actor):
-        return jax.vmap(choose_action, in_axes=(None, 0, None))(actor_params, obs, actor)
 
     @partial(jax.pmap, axis_name="devices")
     def pmap_normalize(obs):
@@ -521,6 +508,8 @@ def main() -> None:
                 actions = choose_action(ppo.actor_params, obs, ppo.actor)
 
                 states = pmap_step_fn(states, actions)
+
+                # these are (num_devices, envs_per_device, ...)
                 next_obs, rewards, dones = states.obs, states.reward, states.done
                 masks = (1 - dones).astype(jnp.float32)
 
@@ -542,8 +531,9 @@ def main() -> None:
                     and i % args.save_video_every == 0
                     and len(rollout) < args.video_length * int(1 / env.dt)
                 ):
-                    unwrapped_states = unwrap_state_vectorization(
-                        jax.device_get(states.pipeline_state), args.envs_to_sample
+                    # need to unwrap states to render
+                    unwrapped_states = unwrap_state_vectorization_parallelization(
+                        jax.device_get(states.pipeline_state), args.envs_to_sample, num_devices
                     )
                     rollout.extend(unwrapped_states)
 
