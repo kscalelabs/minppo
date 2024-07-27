@@ -20,18 +20,21 @@ from tqdm import tqdm
 
 from environment import HumanoidEnv
 
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
+
 
 @dataclass
 class Config:
     lr_actor: float = field(default=0.0003)
     lr_critic: float = field(default=0.0003)
     num_iterations: int = field(default=20)
-    num_envs: int = field(default=8)  # if too high, can just end up not finishing episodes (especially in rollout)
+    num_envs: int = field(default=4)  # if too high, can just end up not finishing episodes (especially in rollout)
     max_steps: int = field(default=100000)
     max_steps_per_epoch: int = field(default=2048)
     gamma: float = field(default=0.98)
     lambd: float = field(default=0.98)
-    batch_size: int = field(default=64)
+    minibatch_size: int = field(default=16)
+    batch_size: int = field(default=512)
     epsilon: float = field(default=0.2)
     l2_rate: float = field(default=0.001)
     beta: int = field(default=3)
@@ -149,7 +152,9 @@ class Ppo:
         ) -> Tuple[Dict[str, Any], Array, Array]:
             actor_params, critic_params, actor_opt_state, critic_opt_state = params
 
+            print(states.shape, actions.shape, rewards.shape, masks.shape)
             values = self.critic_apply(critic_params, states).squeeze()
+            print(values.shape)
             returns, advants = self.get_gae(rewards, masks, values, gamma, lambd)
 
             old_mu, old_std = self.actor_apply(actor_params, states)
@@ -195,6 +200,11 @@ class Ppo:
         return train_step(params, states, actions, rewards, masks, eps, gamma, lambd)
 
     def get_gae(self, rewards: Array, masks: Array, values: Array, gamma: float, lambd: float) -> Tuple[Array, Array]:
+        print(values.shape)
+        print(rewards.shape)
+        print(masks.shape)
+        breakpoint()
+
         def gae_step(carry: Tuple[Array, Array], inp: Tuple[Array, Array, Array]) -> Tuple[Tuple[Array, Array], Array]:
             gae, next_value = carry
             reward, mask, value = inp
@@ -205,8 +215,8 @@ class Ppo:
         # calculating advantage = combination of immediate reward and diminishing value of future rewards
         _, advantages = jax.lax.scan(
             f=gae_step,
-            init=(jnp.zeros_like(rewards[0]), values[0]),
-            xs=(rewards, masks, values),
+            init=(jnp.zeros_like(rewards[-1]), values[-1]),
+            xs=(rewards[::-1], masks[::-1], values[::-1]),
             reverse=True,
         )
 
@@ -225,6 +235,9 @@ class Ppo:
         n = len(states)
         num_devices = jax.local_device_count()
         batch_size = config.batch_size
+        minibatch_size = config.minibatch_size
+
+        jax.debug.print("devices {}", num_devices)
 
         assert batch_size % num_devices == 0, "Batch size must be divisible by number of devices"
 
@@ -240,19 +253,18 @@ class Ppo:
                 batch_start = i * batch_size
                 batch_end = (i + 1) * batch_size
 
-                # splitting atches across GPUs
-                b_states = jnp.atleast_1d(states[batch_start:batch_end].reshape(num_devices, -1, states.shape[-1]))
-                b_actions = jnp.atleast_1d(actions[batch_start:batch_end].reshape(num_devices, -1, actions.shape[-1]))
-                b_rewards = jnp.atleast_1d(rewards[batch_start:batch_end].reshape(num_devices, -1))
-                b_masks = jnp.atleast_1d(masks[batch_start:batch_end].reshape(num_devices, -1))
-
+                # shaping variables to be split across GPUs, then vectorized
+                b_states = states[batch_start:batch_end].reshape(num_devices, -1, minibatch_size, states.shape[-1])
+                b_actions = actions[batch_start:batch_end].reshape(num_devices, -1, minibatch_size, actions.shape[-1])
+                b_rewards = rewards[batch_start:batch_end].reshape(num_devices, -1, minibatch_size)
+                b_masks = masks[batch_start:batch_end].reshape(num_devices, -1, minibatch_size)
                 params = self.get_params()
 
                 # replicating values to parallelize training
                 # ['params']['Dense_0', 'Dense_1', 'Dense_2', 'Dense_3']['kernel', 'bias']
                 replicated_params = jax.tree.map(lambda x: jnp.array([x] * num_devices), params)
 
-                # jax.debug.breakpoint()
+                jax.debug.breakpoint()
                 new_params, actor_loss, critic_loss = self.pmap_train_step(
                     replicated_params,
                     b_states,
