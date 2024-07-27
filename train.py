@@ -26,8 +26,8 @@ class Config:
     lr_actor: float = field(default=0.0003)
     lr_critic: float = field(default=0.0003)
     num_iterations: int = field(default=20)
-    num_envs: int = field(default=16)  # if too high, can just end up not finishing episodes (especially in rollout)
-    max_steps: int = field(default=10000)
+    num_envs: int = field(default=8)  # if too high, can just end up not finishing episodes (especially in rollout)
+    max_steps: int = field(default=100000)
     max_steps_per_epoch: int = field(default=2048)
     gamma: float = field(default=0.98)
     lambd: float = field(default=0.98)
@@ -65,13 +65,22 @@ class Ppo:
         self.actor_params, self.critic_params, self.actor_opt_state, self.critic_opt_state = new_params
 
     # puts train steps on different gpus
-    # self is a start broadcasted type
-    @partial(jax.pmap, axis_name="batch", static_broadcasted_argnums=(0, 6, 7, 8, 9))
-    def pmap_train_step(self, params, states, actions, rewards, masks, eps, gamma, lambd):
-
-        # @partial(jax.vmap, axis_name="j", static_broadcasted_argnums=(0, 6, 7, 8, 9))
-        def train_step(
-            self,
+    # self is a start broadcasted type, but params is unhashable so can't be broadcastsed
+    @partial(jax.pmap, axis_name="devices", static_broadcasted_argnums=(0, 6, 7, 8))
+    def pmap_train_step(
+        self,
+        params: Tuple[Array, Array, optax.OptState, optax.OptState],
+        states: Array,
+        actions: Array,
+        rewards: Array,
+        masks: Array,
+        eps: float,
+        gamma: float,
+        lambd: float,
+    ) -> Tuple[Dict[str, Any], Array, Array]:
+        # NOTE: doesn't work because params cannot be vectorized unless unroll (kernel/bias different sizes)
+        # @partial(jax.vmap, axis_name="batches // devices", static_broadcasted_argnums=(0, 6, 7, 8))
+        def deprecated_train_step(
             params: Tuple[Array, Array, optax.OptState, optax.OptState],
             states: Array,
             actions: Array,
@@ -82,8 +91,6 @@ class Ppo:
             lambd: float,
         ) -> Tuple[Dict[str, Any], Array, Array]:
             actor_params, critic_params, actor_opt_state, critic_opt_state = params
-
-            jax.debug.breakpoint()
 
             values = jax.vmap(self.critic_apply)(critic_params, states).squeeze()
             returns, advants = self.get_gae(rewards, masks, values, gamma, lambd)
@@ -128,9 +135,9 @@ class Ppo:
 
             return new_params, actor_loss, critic_loss
 
-        # @partial(jax.vmap, axis_name="j", static_broadcasted_argnums=(0, 6, 7, 8, 9))
-        def train_step_no_vmap(
-            self,
+        # split across batches // devices
+        @partial(jax.vmap, in_axes=(None, 0, 0, 0, 0, None, None, None))
+        def train_step(
             params: Tuple[Array, Array, optax.OptState, optax.OptState],
             states: Array,
             actions: Array,
@@ -141,8 +148,6 @@ class Ppo:
             lambd: float,
         ) -> Tuple[Dict[str, Any], Array, Array]:
             actor_params, critic_params, actor_opt_state, critic_opt_state = params
-
-            jax.debug.breakpoint()
 
             values = self.critic_apply(critic_params, states).squeeze()
             returns, advants = self.get_gae(rewards, masks, values, gamma, lambd)
@@ -187,26 +192,21 @@ class Ppo:
 
             return new_params, actor_loss, critic_loss
 
-        import jax
-
-        jax.debug.breakpoint()
-
-        return train_step_no_vmap(self, params, states, actions, rewards, masks, eps, gamma, lambd)
-        # return jax.vmap(train_step_no_vmap)(params, states, actions, rewards, masks, eps, gamma, lambd)
+        return train_step(params, states, actions, rewards, masks, eps, gamma, lambd)
 
     def get_gae(self, rewards: Array, masks: Array, values: Array, gamma: float, lambd: float) -> Tuple[Array, Array]:
         def gae_step(carry: Tuple[Array, Array], inp: Tuple[Array, Array, Array]) -> Tuple[Tuple[Array, Array], Array]:
             gae, next_value = carry
             reward, mask, value = inp
             delta = reward + gamma * next_value * mask - value
-            gae = delta + gamma * lambd * mask * gae
+            gae = delta + gamma * lambd * mask * gae  # mask for not counting reward when done
             return (gae, value), gae
 
         # calculating advantage = combination of immediate reward and diminishing value of future rewards
         _, advantages = jax.lax.scan(
             f=gae_step,
-            init=(jnp.zeros_like(rewards[-1]), values[-1]),
-            xs=(rewards[::-1], masks[::-1], values[::-1]),
+            init=(jnp.zeros_like(rewards[0]), values[0]),
+            xs=(rewards, masks, values),
             reverse=True,
         )
 
@@ -216,9 +216,6 @@ class Ppo:
         return returns, advantages
 
     def train(self, memory: List[Tuple[Array, Array, Array, Array]], config: Config) -> None:
-
-        # NOTE: think this needs to be reimplemented for vecotization because currently,
-        # doesn't account that memory order is maintained
 
         states = jnp.array([e[0] for e in memory])
         actions = jnp.array([e[1] for e in memory])
@@ -251,17 +248,9 @@ class Ppo:
 
                 params = self.get_params()
 
-                # gamma = jnp.atleast_1d(config.gamma)
-                # epsilon = jnp.atleast_1d(config.epsilon)
-                # lambd = jnp.atleast_1d(config.lambd)
-
                 # replicating values to parallelize training
-                # NOTE: does this need to be unrolled for vmap?
                 # ['params']['Dense_0', 'Dense_1', 'Dense_2', 'Dense_3']['kernel', 'bias']
                 replicated_params = jax.tree.map(lambda x: jnp.array([x] * num_devices), params)
-                # replicated_epsilon = jnp.full((num_devices,), config.epsilon)
-                # replicated_gamma = jnp.full((num_devices,), config.gamma)
-                # replicated_lambd = jnp.full((num_devices,), config.lambd)
 
                 # jax.debug.breakpoint()
                 new_params, actor_loss, critic_loss = self.pmap_train_step(
@@ -277,6 +266,7 @@ class Ppo:
 
                 # Aggregate results from all devices
                 new_params = jax.tree.map(lambda x: x[0], new_params)
+                print(actor_loss)
                 actor_loss = jnp.mean(actor_loss)
                 critic_loss = jnp.mean(critic_loss)
 
