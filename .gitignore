@@ -20,6 +20,7 @@ out*/
 *.txt
 *.pkl
 
+logs/
 videos/
 environments/
 screenshots/

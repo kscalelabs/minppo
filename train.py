@@ -20,19 +20,21 @@ from tqdm import tqdm
 
 from environment import HumanoidEnv
 
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
+
 
 @dataclass
 class Config:
     lr_actor: float = field(default=0.0003)
     lr_critic: float = field(default=0.0003)
     num_iterations: int = field(default=20)
-    num_envs: int = field(default=16)  # if too high, can just end up not finishing episodes (especially in rollout)
+    num_envs: int = field(default=8)  # if too high, can just end up not finishing episodes (especially in rollout)
     max_steps: int = field(default=100000)
-    max_steps_per_epoch: int = field(default=2048)
+    max_steps_per_epoch: int = field(default=2048)  # increase to get more rollout + training for ppo each iteration
     gamma: float = field(default=0.98)
     lambd: float = field(default=0.98)
-    minibatch_size: int = field(default=16)
-    batch_size: int = field(default=512)
+    minibatch_size: int = field(default=2)
+    batch_size: int = field(default=32)
     epsilon: float = field(default=0.2)
     l2_rate: float = field(default=0.001)
     beta: int = field(default=3)
@@ -40,14 +42,15 @@ class Config:
 
 class Ppo:
     def __init__(self, observation_size: int, action_size: int, config: Config, key: Array) -> None:
-        self.actor = Actor(action_size)
+        self.actor = Actor(action_size, observation_size)
         self.critic = Critic()
         self.actor_params = self.actor.init(key, jnp.zeros((1, observation_size)))
         self.critic_params = self.critic.init(key, jnp.zeros((1, observation_size)))
+        self.config = config
 
-        # 
-        self.actor_apply = jax.jit(lambda params, x: self.actor.apply(params, x))
-        self.critic_apply = jax.jit(lambda params, x: self.critic.apply(params, x))
+        # vectorized functions for applying actor and critic, (None, 0) for the non-batched dimensions
+        self.actor_apply = jax.jit(jax.vmap(lambda params, x: self.actor.apply(params, x), in_axes=(None, 0)))
+        self.critic_apply = jax.jit(jax.vmap(lambda params, x: self.critic.apply(params, x), in_axes=(None, 0)))
 
         self.actor_optim = optax.adam(learning_rate=config.lr_actor)
         self.critic_optim = optax.adamw(learning_rate=config.lr_critic, weight_decay=config.l2_rate)
@@ -68,93 +71,28 @@ class Ppo:
 
     # puts train steps on different gpus
     # self is a start broadcasted type, but params is unhashable so can't be broadcastsed
-    @partial(jax.pmap, axis_name="devices", static_broadcasted_argnums=(0, 6, 7, 8))
+    @partial(jax.pmap, axis_name="devices", static_broadcasted_argnums=(0,))
     def pmap_train_step(
         self,
-        params: Tuple[Array, Array, optax.OptState, optax.OptState],
         states: Array,
         actions: Array,
         rewards: Array,
         masks: Array,
-        eps: float,
-        gamma: float,
-        lambd: float,
     ) -> Tuple[Dict[str, Any], Array, Array]:
-        # NOTE: doesn't work because params cannot be vectorized unless unroll (kernel/bias different sizes)
-        # @partial(jax.vmap, axis_name="batches // devices", static_broadcasted_argnums=(0, 6, 7, 8))
-        def deprecated_train_step(
-            params: Tuple[Array, Array, optax.OptState, optax.OptState],
-            states: Array,
-            actions: Array,
-            rewards: Array,
-            masks: Array,
-            eps: float,
-            gamma: float,
-            lambd: float,
-        ) -> Tuple[Dict[str, Any], Array, Array]:
-            actor_params, critic_params, actor_opt_state, critic_opt_state = params
-
-            values = jax.vmap(self.critic_apply)(critic_params, states).squeeze()
-            returns, advants = self.get_gae(rewards, masks, values, gamma, lambd)
-
-            old_mu, old_std = jax.vmap(self.actor_apply)(actor_params, states)
-            old_log_prob = actor_log_prob(old_mu, old_std, actions)
-
-            # maximizing advantage while minimizing change
-            def actor_loss_fn(params: Array) -> Array:
-                mu, std = jax.vmap(self.actor_apply)(params, states)
-                new_log_prob = actor_log_prob(mu, std, actions)
-
-                # generally, we don't want our policy's output distribution
-                # to change too much between iterations
-                ratio = jnp.exp(new_log_prob - old_log_prob)
-                surrogate_loss = ratio * advants
-
-                clipped_loss = jnp.clip(ratio, 1.0 - eps, 1.0 + eps) * advants
-                actor_loss = -jnp.mean(jnp.minimum(surrogate_loss, clipped_loss))
-                return actor_loss
-
-            # want the critic to best approximate rewards/returns
-            def critic_loss_fn(params: Array) -> Array:
-                critic_returns = jax.vmap(self.critic_apply)(params, states).squeeze()
-                critic_loss = jnp.mean((critic_returns - returns) ** 2)
-                return critic_loss
-
-            # graidents + backpropogation
-            actor_grad_fn = jax.value_and_grad(actor_loss_fn)
-            actor_loss, actor_grads = actor_grad_fn(actor_params)
-            actor_updates, new_actor_opt_state = self.actor_optim.update(actor_grads, actor_opt_state, actor_params)
-            new_actor_params = optax.apply_updates(actor_params, actor_updates)
-
-            critic_grad_fn = jax.value_and_grad(critic_loss_fn)
-            critic_loss, critic_grads = critic_grad_fn(critic_params)
-            critic_updates, new_critic_opt_state = self.critic_optim.update(
-                critic_grads, critic_opt_state, critic_params
-            )
-            new_critic_params = optax.apply_updates(critic_params, critic_updates)
-
-            new_params = (new_actor_params, new_critic_params, new_actor_opt_state, new_critic_opt_state)
-
-            return new_params, actor_loss, critic_loss
 
         # split across batches // devices
-        @partial(jax.vmap, in_axes=(None, 0, 0, 0, 0, None, None, None))
+        @partial(jax.vmap, in_axes=(0, 0, 0, 0))
         def train_step(
-            params: Tuple[Array, Array, optax.OptState, optax.OptState],
             states: Array,
             actions: Array,
             rewards: Array,
             masks: Array,
-            eps: float,
-            gamma: float,
-            lambd: float,
         ) -> Tuple[Dict[str, Any], Array, Array]:
-            actor_params, critic_params, actor_opt_state, critic_opt_state = params
+            # vectorizations are using different parameters in vmap
+            actor_params, critic_params, actor_opt_state, critic_opt_state = self.get_params()
 
-            print(states.shape, actions.shape, rewards.shape, masks.shape)
             values = self.critic_apply(critic_params, states).squeeze()
-            print(values.shape)
-            returns, advants = self.get_gae(rewards, masks, values, gamma, lambd)
+            returns, advants = self.get_gae(rewards, masks, values)
 
             old_mu, old_std = self.actor_apply(actor_params, states)
             old_log_prob = actor_log_prob(old_mu, old_std, actions)
@@ -166,10 +104,12 @@ class Ppo:
 
                 # generally, we don't want our policy's output distribution
                 # to change too much between iterations
+                print("a")
+                jax.debug.breakpoint()
                 ratio = jnp.exp(new_log_prob - old_log_prob)
                 surrogate_loss = ratio * advants
 
-                clipped_loss = jnp.clip(ratio, 1.0 - eps, 1.0 + eps) * advants
+                clipped_loss = jnp.clip(ratio, 1.0 - self.config.epsilon, 1.0 + self.config.epsilon) * advants
                 actor_loss = -jnp.mean(jnp.minimum(surrogate_loss, clipped_loss))
                 return actor_loss
 
@@ -194,17 +134,19 @@ class Ppo:
 
             new_params = (new_actor_params, new_critic_params, new_actor_opt_state, new_critic_opt_state)
 
+            print("b")
+            jax.debug.breakpoint()
             return new_params, actor_loss, critic_loss
 
-        return train_step(params, states, actions, rewards, masks, eps, gamma, lambd)
+        return train_step(states, actions, rewards, masks)
 
-    def get_gae(self, rewards: Array, masks: Array, values: Array, gamma: float, lambd: float) -> Tuple[Array, Array]:
+    def get_gae(self, rewards: Array, masks: Array, values: Array) -> Tuple[Array, Array]:
 
         def gae_step(carry: Tuple[Array, Array], inp: Tuple[Array, Array, Array]) -> Tuple[Tuple[Array, Array], Array]:
             gae, next_value = carry
             reward, mask, value = inp
-            delta = reward + gamma * next_value * mask - value
-            gae = delta + gamma * lambd * mask * gae  # mask for not counting reward when done
+            delta = reward + self.config.gamma * next_value * mask - value
+            gae = delta + self.config.gamma * self.config.lambd * mask * gae  # mask for not counting reward when done
             return (gae, value), gae
 
         # calculating advantage = combination of immediate reward and diminishing value of future rewards
@@ -232,7 +174,9 @@ class Ppo:
         batch_size = config.batch_size
         minibatch_size = config.minibatch_size
 
-        assert batch_size % num_devices == 0, "Batch size must be divisible by number of devices"
+        assert (
+            batch_size % (num_devices * minibatch_size) == 0
+        ), "Batch size must be divisible by num_devices * minibatch_size"
 
         for epoch in range(1):
 
@@ -247,32 +191,27 @@ class Ppo:
                 batch_end = (i + 1) * batch_size
 
                 # shaping variables to be split across GPUs, then vectorized
+                # according to remaining diensions (minibatch left to PPO policy)
                 b_states = states[batch_start:batch_end].reshape(num_devices, -1, minibatch_size, states.shape[-1])
                 b_actions = actions[batch_start:batch_end].reshape(num_devices, -1, minibatch_size, actions.shape[-1])
                 b_rewards = rewards[batch_start:batch_end].reshape(num_devices, -1, minibatch_size)
                 b_masks = masks[batch_start:batch_end].reshape(num_devices, -1, minibatch_size)
-                params = self.get_params()
 
-                # replicating values to parallelize training
-                # ['params']['Dense_0', 'Dense_1', 'Dense_2', 'Dense_3']['kernel', 'bias']
-                replicated_params = jax.tree.map(lambda x: jnp.array([x] * num_devices), params)
-
+                # outputs with (num_devices, vectors_per_device, ...)
                 new_params, actor_loss, critic_loss = self.pmap_train_step(
-                    replicated_params,
                     b_states,
                     b_actions,
                     b_rewards,
                     b_masks,
-                    config.epsilon,
-                    config.gamma,
-                    config.lambd,
                 )
 
-                # Aggregate results from all devices
-                new_params = jax.tree.map(lambda x: x[0], new_params)
-                print(actor_loss)
+                # averaging across all devices and vectorizations
+                new_params = jax.tree_map(lambda x: jnp.mean(x, axis=(0, 1)), new_params)
                 actor_loss = jnp.mean(actor_loss)
                 critic_loss = jnp.mean(critic_loss)
+
+                print("c")
+                jax.debug.breakpoint()
 
                 self.update_params(new_params)
 
@@ -291,25 +230,30 @@ def actor_distribution(mu: Array, sigma: Array) -> Array:
 
 class Actor(nn.Module):
     action_size: int
+    observation_size: int
 
     @nn.compact
     def __call__(self, x: Array) -> Tuple[Array, Array]:
+
         x = nn.Dense(64, dtype=jnp.float32)(x)
         x = nn.tanh(x)
         x = nn.Dense(64, dtype=jnp.float32)(x)
         x = nn.tanh(x)
         mu = nn.Dense(self.action_size, kernel_init=nn.initializers.constant(0.1), dtype=jnp.float32)(x)
         log_sigma = nn.Dense(self.action_size, dtype=jnp.float32)(x)
+
         return mu, jnp.exp(log_sigma)
 
 
 class Critic(nn.Module):
     @nn.compact
     def __call__(self, x: Array) -> Array:
+
         x = nn.Dense(64, dtype=jnp.float32)(x)
         x = nn.tanh(x)
         x = nn.Dense(64, dtype=jnp.float32)(x)
         x = nn.tanh(x)
+
         return nn.Dense(1, kernel_init=nn.initializers.constant(0.1), dtype=jnp.float32)(x)
 
 
@@ -378,56 +322,28 @@ def screenshot(
     print(f"Screenshot saved as {filename}")
 
 
-def unwrap_state_vectorization_parallelization(state: State, envs_to_sample: int) -> State:
+def unwrap_state_vectorization_parallelization(state: State, envs_to_sample: int, num_devices: int) -> State:
     unwrapped_rollout = []
     # Get all attributes of the state
     attributes = dir(state)
 
-    ne = getattr(state, "ne", 1)  # Default to 1 if not present
-    nl = state.nl
-    nefc = state.nefc
-    nf = state.nf
-
     # NOTE: can change ordering of this to save runtime if want to save more vectorized states.
     # saves from only first vectorized state
     for env in range(envs_to_sample):
-        i, j = divmod(env, ne)
+        i, j = divmod(env, num_devices)
         # Create a new state with the first element of each attribute
         new_state = {}
         for attr in attributes:
             # Skip special methods and attributes
-            if (
-                not attr.startswith("_")
-                and not callable(getattr(state, attr))
-                and attr not in ["ne", "nl", "nf", "nefc"]
-            ):
+            if not attr.startswith("_") and not callable(getattr(state, attr)):
                 value = getattr(state, attr)
                 try:
-                    if hasattr(value, "__getitem__"):
-                        new_state[attr] = value[j][i]
-                    else:
-                        new_state[attr] = value
+                    new_state[attr] = value[j][i]
                 except Exception:
-                    print(f"Could not get first element of {attr}")
-        unwrapped_rollout.append((type(state)(ne, nl, nefc, nf, **new_state), i))
+                    new_state[attr] = value
+        unwrapped_rollout.append((type(state)(**new_state), i))
 
     return unwrapped_rollout
-
-
-@partial(jax.jit, static_argnums=(2,))
-def choose_action(actor_params: Mapping[str, Mapping[str, Any]], obs: Array, actor: Actor) -> Array:
-    # given a state, we do our forward pass and then sample from to maintain "random actions"
-    mu, sigma = actor.apply(actor_params, obs)
-    return actor_distribution(mu, sigma)  # type: ignore[arg-type]
-
-
-@jax.jit
-def update_memory(memory, new_data):
-    def concat_and_reshape(x, y):
-        concat = jnp.concatenate([x, y])
-        return concat
-
-    return jax.tree.map(concat_and_reshape, memory, new_data)
 
 
 def main() -> None:
@@ -467,7 +383,21 @@ def main() -> None:
 
     num_devices = jax.device_count()
     envs_per_device = config.num_envs // num_devices
+
+    print("devices", num_devices)
+    print("vectorization", config.batch_size // (num_devices * config.minibatch_size))
+    print("minibatches", config.minibatch_size)
+    print("batces", config.batch_size)
+
     assert config.num_envs % num_devices == 0, "Number of environments must be divisible by number of devices"
+
+    @jax.jit
+    def update_memory(memory, new_data):
+        def concat_and_reshape(x, y):
+            concat = jnp.concatenate([x, y])
+            return concat
+
+        return jax.tree.map(concat_and_reshape, memory, new_data)
 
     @partial(jax.pmap, axis_name="devices")
     def pmap_reset_fn(rng):
@@ -483,6 +413,8 @@ def main() -> None:
         return jax.vmap(normalize)(obs)
 
     for i in range(1, config.num_iterations + 1):
+        print("epoch", i)
+
         memory = {
             "states": jnp.empty((0, num_devices, envs_per_device, observation_size)),
             "actions": jnp.empty((0, num_devices, envs_per_device, action_size)),
@@ -492,6 +424,17 @@ def main() -> None:
         scores = []
         steps = 0
         rollout = []
+
+        # must be in loop in order to get updated params
+        @partial(jax.jit, static_argnums=(1,))
+        def choose_action(actor_params: Mapping[str, Mapping[str, Any]], obs: Array) -> Array:
+            # given a state, we do our forward pass and then sample from to maintain "random actions"
+            mu, sigma = ppo.actor.apply(actor_params, obs)
+            return actor_distribution(mu, sigma)  # type: ignore[arg-type]
+
+        @partial(jax.pmap, axis_name="devices")
+        def pmap_choose_action(obs):
+            return jax.vmap(choose_action, in_axes=(None, 0))(ppo.actor_params, obs)
 
         pbar = tqdm(total=config.max_steps_per_epoch, desc=f"Steps for iteration {i}")
 
@@ -505,8 +448,9 @@ def main() -> None:
             score = jnp.zeros((num_devices, envs_per_device))
 
             for _ in range(config.max_steps // config.num_envs):
-                actions = choose_action(ppo.actor_params, obs, ppo.actor)
 
+                # observation then stepping forward simulation
+                actions = pmap_choose_action(obs)
                 states = pmap_step_fn(states, actions)
 
                 # these are (num_devices, envs_per_device, ...)
@@ -540,7 +484,7 @@ def main() -> None:
                 if jnp.all(dones):
                     break
 
-            with open("log_" + args.env_name + ".txt", "a") as outfile:
+            with open("logs/log_" + args.env_name + ".txt", "a") as outfile:
                 outfile.write("\t" + str(episodes) + "\t" + str(jnp.mean(score)) + "\n")
             scores.append(jnp.mean(score))
 

@@ -26,6 +26,10 @@ Minimal training and inference code for making a humanoid robot stand up.
 - `export DISPLAY=:0` if in a headless environmnet
 - Run `train.py`!
 
+## Learned (incomplete)
+- `vmap` can specify axes to vectorize over. For dictionaries, have to create our own broadcasting
+- With N GPUs, models are made to take in size N data?
+
 ## TODO
 
 - [ ] Implement simple MJX environment using [Unitree G1 simulation artifacts](https://humanoids.wiki/w/Robot_Descriptions_List), similar to [this](https://gymnasium.farama.org/environments/mujoco/humanoid_standup)
