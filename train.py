@@ -28,7 +28,7 @@ class Config:
     lr_actor: float = field(default=0.0003)
     lr_critic: float = field(default=0.0003)
     num_iterations: int = field(default=20)
-    num_envs: int = field(default=4)  # if too high, can just end up not finishing episodes (especially in rollout)
+    num_envs: int = field(default=32)  # if too high, can just end up not finishing episodes (especially in rollout)
     max_steps: int = field(default=100000)
     max_steps_per_epoch: int = field(default=2048)
     gamma: float = field(default=0.98)
@@ -200,10 +200,6 @@ class Ppo:
         return train_step(params, states, actions, rewards, masks, eps, gamma, lambd)
 
     def get_gae(self, rewards: Array, masks: Array, values: Array, gamma: float, lambd: float) -> Tuple[Array, Array]:
-        print(values.shape)
-        print(rewards.shape)
-        print(masks.shape)
-        breakpoint()
 
         def gae_step(carry: Tuple[Array, Array], inp: Tuple[Array, Array, Array]) -> Tuple[Tuple[Array, Array], Array]:
             gae, next_value = carry
@@ -237,8 +233,6 @@ class Ppo:
         batch_size = config.batch_size
         minibatch_size = config.minibatch_size
 
-        jax.debug.print("devices {}", num_devices)
-
         assert batch_size % num_devices == 0, "Batch size must be divisible by number of devices"
 
         for epoch in range(1):
@@ -264,7 +258,6 @@ class Ppo:
                 # ['params']['Dense_0', 'Dense_1', 'Dense_2', 'Dense_3']['kernel', 'bias']
                 replicated_params = jax.tree.map(lambda x: jnp.array([x] * num_devices), params)
 
-                jax.debug.breakpoint()
                 new_params, actor_loss, critic_loss = self.pmap_train_step(
                     replicated_params,
                     b_states,
@@ -302,19 +295,43 @@ class Actor(nn.Module):
 
     @nn.compact
     def __call__(self, x: Array) -> Tuple[Array, Array]:
-        x = nn.tanh(nn.Dense(64)(x))
-        x = nn.tanh(nn.Dense(64)(x))
-        mu = nn.Dense(self.action_size, kernel_init=nn.initializers.constant(0.1))(x)
-        log_sigma = nn.Dense(self.action_size)(x)
+        x = nn.Dense(64, dtype=jnp.float32)(x)
+        x = nn.tanh(x)
+        x = nn.Dense(64, dtype=jnp.float32)(x)
+        x = nn.tanh(x)
+        mu = nn.Dense(self.action_size, kernel_init=nn.initializers.constant(0.1), dtype=jnp.float32)(x)
+        log_sigma = nn.Dense(self.action_size, dtype=jnp.float32)(x)
         return mu, jnp.exp(log_sigma)
 
 
 class Critic(nn.Module):
     @nn.compact
     def __call__(self, x: Array) -> Array:
-        x = nn.tanh(nn.Dense(64)(x))
-        x = nn.tanh(nn.Dense(64)(x))
-        return nn.Dense(1, kernel_init=nn.initializers.constant(0.1))(x)
+        x = nn.Dense(64, dtype=jnp.float32)(x)
+        x = nn.tanh(x)
+        x = nn.Dense(64, dtype=jnp.float32)(x)
+        x = nn.tanh(x)
+        return nn.Dense(1, kernel_init=nn.initializers.constant(0.1), dtype=jnp.float32)(x)
+
+
+# class Actor(nn.Module):
+#     action_size: int
+
+#     @nn.compact
+#     def __call__(self, x: Array) -> Tuple[Array, Array]:
+#         x = nn.tanh(nn.Dense(64)(x))
+#         x = nn.tanh(nn.Dense(64)(x))
+#         mu = nn.Dense(self.action_size, kernel_init=nn.initializers.constant(0.1))(x)
+#         log_sigma = nn.Dense(self.action_size)(x)
+#         return mu, jnp.exp(log_sigma)
+
+
+# class Critic(nn.Module):
+#     @nn.compact
+#     def __call__(self, x: Array) -> Array:
+#         x = nn.tanh(nn.Dense(64)(x))
+#         x = nn.tanh(nn.Dense(64)(x))
+#         return nn.Dense(1, kernel_init=nn.initializers.constant(0.1))(x)
 
 
 # for normalizaing observation states
@@ -405,15 +422,12 @@ def choose_action(actor_params: Mapping[str, Mapping[str, Any]], obs: Array, act
 
 
 @jax.jit
-def update_memory(memory: Dict[str, Array], new_data: Dict[str, Array]) -> Dict[str, Array]:
-    # want to update memory to be compatible with how we are vectorizing
-    def concat_and_reshape(x: Array, y: Array) -> Array:
+def update_memory(memory, new_data):
+    def concat_and_reshape(x, y):
         concat = jnp.concatenate([x, y])
-        num_envs = y.shape[1]
-        new_shape = (-1, num_envs) + y.shape[2:]
-        return concat.reshape(new_shape).transpose(0, 1, *range(2, len(new_shape)))
+        return concat
 
-    return jax.tree.map(concat_and_reshape, memory, new_data)
+    return jax.tree_map(concat_and_reshape, memory, new_data)
 
 
 def main() -> None:
@@ -460,41 +474,61 @@ def main() -> None:
     normalize = Normalize(observation_size)
     episodes: int = 0
 
+    num_devices = jax.device_count()
+    envs_per_device = config.num_envs // num_devices
+    assert config.num_envs % num_devices == 0, "Number of environments must be divisible by number of devices"
+
+    @partial(jax.pmap, axis_name="devices")
+    def pmap_reset_fn(rng):
+        rngs = jax.random.split(rng, envs_per_device)
+        return jax.vmap(env.reset)(rngs)
+
+    @partial(jax.pmap, axis_name="devices")
+    def pmap_step_fn(states, actions):
+        return jax.vmap(env.step)(states, actions)
+
+    @partial(jax.pmap, axis_name="devices")
+    def pmap_choose_action(actor_params, obs, actor):
+        return jax.vmap(choose_action, in_axes=(None, 0, None))(actor_params, obs, actor)
+
+    @partial(jax.pmap, axis_name="devices")
+    def pmap_normalize(obs):
+        return jax.vmap(normalize)(obs)
+
     for i in range(1, config.num_iterations + 1):
-        # Initialize memory as JAX arrays
         memory = {
-            "states": jnp.empty((0, config.num_envs, observation_size)),
-            "actions": jnp.empty((0, config.num_envs, action_size)),
-            "rewards": jnp.empty((0, config.num_envs)),
-            "masks": jnp.empty((0, config.num_envs)),
+            "states": jnp.empty((0, num_devices, envs_per_device, observation_size)),
+            "actions": jnp.empty((0, num_devices, envs_per_device, action_size)),
+            "rewards": jnp.empty((0, num_devices, envs_per_device)),
+            "masks": jnp.empty((0, num_devices, envs_per_device)),
         }
         scores = []
         steps = 0
-        rollout: List[MjxState] = []
+        rollout = []
 
         pbar = tqdm(total=config.max_steps_per_epoch, desc=f"Steps for iteration {i}")
 
         while steps < config.max_steps_per_epoch:
             episodes += config.num_envs
 
-            rng, subrng = jax.random.split(rng)
-            states = reset_fn(subrng)
-            obs = jax.device_put(normalize(states.obs))
-            score = jnp.zeros(config.num_envs)
+            rng, *subrngs = jax.random.split(rng, num_devices + 1)
+            subrngs = jnp.array(subrngs)
+            states = pmap_reset_fn(subrngs)
+            obs = pmap_normalize(states.obs)
+            score = jnp.zeros((num_devices, envs_per_device))
 
             for _ in range(config.max_steps // config.num_envs):
                 actions = choose_action(ppo.actor_params, obs, ppo.actor)
 
-                states = step_fn(states, actions)
+                states = pmap_step_fn(states, actions)
                 next_obs, rewards, dones = states.obs, states.reward, states.done
                 masks = (1 - dones).astype(jnp.float32)
 
-                # Update memory
                 new_data = {
-                    "states": obs.reshape(1, config.num_envs, -1),
-                    "actions": actions.reshape(1, config.num_envs, -1),
-                    "rewards": rewards.reshape(1, config.num_envs),
-                    "masks": masks.reshape(1, config.num_envs),
+                    "states": obs.reshape(1, num_devices, envs_per_device, -1),
+                    "actions": actions.reshape(1, num_devices, envs_per_device, -1),
+                    "rewards": rewards.reshape(1, num_devices, envs_per_device),
+                    "masks": masks.reshape(1, num_devices, envs_per_device),
                 }
                 memory = update_memory(memory, new_data)
 
@@ -503,13 +537,14 @@ def main() -> None:
                 steps += config.num_envs
                 pbar.update(config.num_envs)
 
-                # Capture first environment for video if enabled
                 if (
                     args.save_video
                     and i % args.save_video_every == 0
                     and len(rollout) < args.video_length * int(1 / env.dt)
                 ):
-                    unwrapped_states = unwrap_state_vectorization(states.pipeline_state, args.envs_to_sample)
+                    unwrapped_states = unwrap_state_vectorization(
+                        jax.device_get(states.pipeline_state), args.envs_to_sample
+                    )
                     rollout.extend(unwrapped_states)
 
                 if jnp.all(dones):
