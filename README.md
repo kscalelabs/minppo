@@ -28,7 +28,14 @@ Minimal training and inference code for making a humanoid robot stand up.
 
 ## Learned (incomplete)
 - `vmap` can specify axes to vectorize over. For dictionaries, have to create our own broadcasting
-- With N GPUs, models are made to take in size N data?
+- Minibatches for vmapping
+- Have to specify different random keys by device axis in RNG
+
+## Room for improvement
+- Training step 
+- Initialize weights different
+- Loss fucntion?
+- Make sure each input batch has enough data?
 
 ## TODO
 

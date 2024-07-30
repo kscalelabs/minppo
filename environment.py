@@ -15,6 +15,7 @@ from brax.mjx.base import State as MjxState
 class HumanoidEnv(PipelineEnv):
     initial_qpos: jp.ndarray
     _action_size: int
+    reset_noise_scale: float = 1e-6
 
     def __init__(self) -> None:
         path: str = os.path.join(os.path.dirname(__file__), "environments", "stompy", "legs.xml")
@@ -30,8 +31,13 @@ class HumanoidEnv(PipelineEnv):
 
     def reset(self, rng: jp.ndarray) -> State:
         """Resets the environment to an initial state."""
-        qpos = self.initial_qpos
-        qvel = jp.zeros(len(qpos) - 1)
+
+        rng, rng1, rng2 = jax.random.split(rng, 3)
+
+        low, hi = -self.reset_noise_scale, self.reset_noise_scale
+
+        qpos = self.initial_qpos + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
+        qvel = jax.random.uniform(rng2, (self.sys.nv,), minval=low, maxval=hi)
 
         # initialize mjx state
         state = self.pipeline_init(qpos, qvel)
