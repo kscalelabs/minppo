@@ -16,14 +16,19 @@ from brax.mjx.base import State as MjxState
 from flax import linen as nn
 from jax import Array
 from tqdm import tqdm
+import logging
 
 from environment import HumanoidEnv
+
+# TODO: 3. Use Equinox
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class Config:
-    lr_actor: float = field(default=0.0003)
-    lr_critic: float = field(default=0.0003)
+    lr_actor: float = field(default=3e-4)
+    lr_critic: float = field(default=3e-4)
     num_iterations: int = field(default=15000)
     num_envs: int = field(default=16)
     max_steps: int = field(default=10000)
@@ -33,7 +38,6 @@ class Config:
     batch_size: int = field(default=64)
     epsilon: float = field(default=0.2)
     l2_rate: float = field(default=0.001)
-    beta: int = field(default=3)
 
 
 class Ppo:
@@ -237,6 +241,12 @@ class Normalize:
         x = jnp.clip(x, -5, +5)
         return x
 
+# specifically for rendering video
+def unwrap_state_vectorization(state, config):
+    if config.num_envs == 1:
+        return state
+    # Get all attributes of the state
+    attributes = dir(state)
 
 def unwrap_state_vectorization(state: State, config: Config) -> State:
     unwrapped_rollout = []
@@ -319,8 +329,9 @@ def main() -> None:
     env = HumanoidEnv()
     observation_size = env.observation_size
     action_size = env.action_size
-    print("action_size", action_size)
-    print("observation_size", observation_size)
+
+    logger.info("action_size %s", action_size)
+    logger.info("observation_size %s", observation_size)
 
     @jax.jit
     def reset_fn(rng: Array) -> State:
@@ -399,7 +410,7 @@ def main() -> None:
 
         score_avg = float(jnp.mean(jnp.array(scores)))
         pbar.close()
-        print("{} episode score is {:.2f}".format(episodes, score_avg))
+        logger.info("Episode %s score is %.2f", episodes, score_avg)
 
         # Save video for this iteration
         if args.save_video_every and i % args.save_video_every == 0 and rollout:
@@ -408,7 +419,7 @@ def main() -> None:
                 env.render(rollout[:: args.render_every], camera="side", width=args.width, height=args.height)
             )
             fps = int(1 / env.dt)
-            print(f"Find video at video.mp4 with fps={fps}")
+            logger.info("Saving video for iteration %d", i)
             media.write_video(f"videos/{args.env_name}_video{i}.mp4", images, fps=fps)
 
         # Convert memory to the format expected by ppo.train
