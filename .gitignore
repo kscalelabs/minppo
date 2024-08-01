@@ -18,7 +18,6 @@ dist/
 out*/
 *.stl
 *.txt
-*.mp4
 
 videos/
 environments/

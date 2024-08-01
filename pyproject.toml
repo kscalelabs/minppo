@@ -30,8 +30,6 @@ plugins = ["numpy.typing.mypy_plugin"]
 module = [
     "brax.*",
     "optax.*",
-    "equinox.*",
-    "tensorflow.*",
     "mujoco.*",
     "torchaudio.*",
     "torchvision.*",

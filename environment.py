@@ -148,7 +148,7 @@ def run_environment_adhoc() -> None:
 
     fps = int(1 / env.dt)
     max_frames = int(args.video_length * fps)
-    rollout: list[Any] = []
+    rollout = []
 
     for episode in range(args.num_episodes):
         rng, _ = jax.random.split(rng)
