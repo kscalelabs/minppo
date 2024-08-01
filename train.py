@@ -20,6 +20,9 @@ from tqdm import tqdm
 
 from environment import HumanoidEnv
 
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+)
 logger = logging.getLogger(__name__)
 
 
@@ -40,6 +43,7 @@ class Config:
 
 class Ppo:
     def __init__(self, observation_size: int, action_size: int, config: Config, key: Array) -> None:
+        """Initialize the PPO model's actor/critic structure and optimizers."""
         self.actor = Actor(action_size)
         self.critic = Critic()
         self.actor_params = self.actor.init(key, jnp.zeros((1, observation_size)))
@@ -52,6 +56,7 @@ class Ppo:
         self.critic_opt_state = self.critic_optim.init(self.critic_params)
 
     def get_params(self) -> Dict[str, Any]:
+        """Get the parameters of the PPO model."""
         return {
             "actor_params": self.actor_params,
             "critic_params": self.critic_params,
@@ -60,6 +65,7 @@ class Ppo:
         }
 
     def update_params(self, new_params: Dict[str, Any]) -> None:
+        """Update the parameters of the PPO model."""
         self.actor_params = new_params["actor_params"]
         self.critic_params = new_params["critic_params"]
         self.actor_opt_state = new_params["actor_opt_state"]
@@ -78,6 +84,7 @@ def train_step(
     masks: Array,
     config: Config,
 ) -> Tuple[Dict[str, Any], Array, Array]:
+    """Perform a single training step with PPO parameters."""
     actor_params, critic_params, actor_opt_state, critic_opt_state = params.values()
 
     values = critic_apply(critic_params, states).squeeze()
@@ -86,13 +93,13 @@ def train_step(
     old_mu, old_std = actor_apply(actor_params, states)
     old_log_prob = actor_log_prob(old_mu, old_std, actions)
 
-    # maximizing advantage while minimizing change
     def actor_loss_fn(params: Array) -> Array:
+        """Prioritizing advantagous actions over more training, clipping to prevent too much change."""
         mu, std = actor_apply(params, states)
         new_log_prob = actor_log_prob(mu, std, actions)
 
-        # generally, we don't want our policy's output distribution
-        # to change too much between iterations
+        # Loss is defined by amount of change to improved state
+        # Multiplied with amount of improvement
         ratio = jnp.exp(new_log_prob - old_log_prob)
         surrogate_loss = ratio * advants
 
@@ -100,17 +107,19 @@ def train_step(
         actor_loss = -jnp.mean(jnp.minimum(surrogate_loss, clipped_loss))
         return actor_loss
 
-    # want the critic to best approximate rewards/returns
     def critic_loss_fn(params: Array) -> Array:
+        """Prioritizing being able to predict the ground truth returns."""
         critic_returns = critic_apply(params, states).squeeze()
         critic_loss = jnp.mean((critic_returns - returns) ** 2)
         return critic_loss
 
+    # Calculating actor loss and updating actor parameters
     actor_grad_fn = jax.value_and_grad(actor_loss_fn)
     actor_loss, actor_grads = actor_grad_fn(actor_params)
     actor_updates, new_actor_opt_state = actor_optim.update(actor_grads, actor_opt_state, actor_params)
     new_actor_params = optax.apply_updates(actor_params, actor_updates)
 
+    # Calculating critic loss and updating actor parameters
     critic_grad_fn = jax.value_and_grad(critic_loss_fn)
     critic_loss, critic_grads = critic_grad_fn(critic_params)
     critic_updates, new_critic_opt_state = critic_optim.update(critic_grads, critic_opt_state, critic_params)
@@ -127,14 +136,17 @@ def train_step(
 
 
 def get_gae(rewards: Array, masks: Array, values: Array, config: Config) -> Tuple[Array, Array]:
+    """Calculate the Generalized Advantage Estimation for rewards using jax.lax.scan."""
+
     def gae_step(carry: Tuple[Array, Array], inp: Tuple[Array, Array, Array]) -> Tuple[Tuple[Array, Array], Array]:
+        """Single step of Generalized Advantage Estimation to be iterated over."""
         gae, next_value = carry
         reward, mask, value = inp
         delta = reward + config.gamma * next_value * mask - value
         gae = delta + config.gamma * config.lambd * mask * gae
         return (gae, value), gae
 
-    # calculating reward, with combination of immediate reward and diminishing value of future rewards
+    # Calculating reward, with combination of immediate reward and diminishing value of future rewards
     _, advantages = jax.lax.scan(
         f=gae_step,
         init=(jnp.zeros_like(rewards[-1]), values[-1]),
@@ -147,8 +159,11 @@ def get_gae(rewards: Array, masks: Array, values: Array, config: Config) -> Tupl
 
 
 def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Config) -> None:
-    # NOTE: think this needs to be reimplemented for vecotization because currently,
+    """Train the PPO model using the memory collected from the environment."""
+    # NOTE: think this needs to be reimplemented for vectorization because currently,
     # doesn't account that memory order is maintained
+
+    # Reorders memory according to states, actions, rewards, masks
     states = jnp.array([e[0] for e in memory])
     actions = jnp.array([e[1] for e in memory])
     rewards = jnp.array([e[2] for e in memory])
@@ -162,6 +177,8 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
         key, subkey = jax.random.split(key)
         arr = jax.random.permutation(subkey, arr)
         for i in range(n // config.batch_size):
+
+            # Batching the data
             batch_indices = arr[config.batch_size * i : config.batch_size * (i + 1)]
             b_states = states[batch_indices]
             b_actions = actions[batch_indices]
@@ -185,14 +202,18 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
 
 
 def actor_log_prob(mu: Array, sigma: Array, actions: Array) -> Array:
+    """Calculate the log probability of the actions given the actor network's output."""
     return jax.scipy.stats.norm.logpdf(actions, mu, sigma).sum(axis=-1)
 
 
 def actor_distribution(mu: Array, sigma: Array) -> Array:
+    """Get an action from the actor network from its probability distribution of actions."""
     return jax.random.normal(jax.random.PRNGKey(0), shape=mu.shape) * sigma + mu
 
 
 class Actor(nn.Module):
+    """Actor network for PPO."""
+
     action_size: int
 
     @nn.compact
@@ -205,6 +226,8 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
+    """Critic network for PPO."""
+
     @nn.compact
     def __call__(self, x: Array) -> Array:
         x = nn.tanh(nn.Dense(64)(x))
@@ -212,43 +235,11 @@ class Critic(nn.Module):
         return nn.Dense(1, kernel_init=nn.initializers.constant(0.1))(x)
 
 
-# for normalizaing observation states
-class Normalize:
-    def __init__(self, observation_size: int) -> None:
-        self.mean: Array = jnp.zeros((observation_size,))
-        self.std: Array = jnp.zeros((observation_size,))
-        self.stdd: Array = jnp.zeros((observation_size,))
-        self.n: int = 0
-
-    def __call__(self, x: Array) -> Array:
-        x = jnp.asarray(x)
-        self.n += 1
-        if self.n == 1:
-            self.mean = x
-        else:
-            old_mean = self.mean.copy()
-            self.mean = old_mean + (x - old_mean) / self.n
-            self.stdd = self.stdd + (x - old_mean) * (x - self.mean)
-        if self.n > 1:
-            self.std = jnp.sqrt(self.stdd / (self.n - 1))
-        else:
-            self.std = self.mean
-
-        x = x - self.mean
-        x = x / (self.std + 1e-8)
-        x = jnp.clip(x, -5, +5)
-        return x
-
-
 def unwrap_state_vectorization(state: State, config: Config) -> State:
+    """Unwraps one environment the vectorized rollout so that the frames in videos are correctly ordered."""
     unwrapped_rollout = []
     # Get all attributes of the state
     attributes = dir(state)
-
-    ne = getattr(state, "ne", 1)  # Default to 1 if not present
-    nl = state.nl
-    nefc = state.nefc
-    nf = state.nf
 
     # NOTE: can change ordering of this to save runtiem if want to save more vectorized states.
     # NOTE: (but anyways, the video isn't correctly ordered then)
@@ -265,18 +256,15 @@ def unwrap_state_vectorization(state: State, config: Config) -> State:
             ):
                 value = getattr(state, attr)
                 try:
-                    if hasattr(value, "__getitem__"):
-                        new_state[attr] = value[i]
-                    else:
-                        new_state[attr] = value
+                    new_state[attr] = value[i]
                 except Exception:
-                    print(f"Could not get first element of {attr}")
-        unwrapped_rollout.append(type(state)(ne, nl, nefc, nf, **new_state))
+                    logger.warning(f"Could not get first element of {attr}. Setting {attr} to {value}")
+                    new_state[attr] = value
+        unwrapped_rollout.append(type(state)(**new_state))
 
     return unwrapped_rollout
 
 
-# show "starting image" of xml for testing
 def screenshot(
     env: HumanoidEnv,
     rng: Array,
@@ -284,18 +272,19 @@ def screenshot(
     height: int = 480,
     filename: str = "screenshot.png",
 ) -> None:
+    """Save a screenshot of the starting environment for debugging initial positions."""
     state = env.reset(rng)
     image_array = env.render(state.pipeline_state, camera="side", width=width, height=height)
     image_array = jnp.array(image_array).astype("uint8")
     os.makedirs("screenshots", exist_ok=True)
     media.write_image(os.path.join("screenshots", filename), image_array)
 
-    print(f"Screenshot saved as {filename}")
+    logger.info(f"Screenshot saved as {filename}")
 
 
 @partial(jax.jit, static_argnums=(2,))
 def choose_action(actor_params: Mapping[str, Mapping[str, Any]], obs: Array, actor: Actor) -> Array:
-    # given a state, we do our forward pass and then sample from to maintain "random actions"
+    # Given a state, we do our forward pass and then sample from to maintain "random actions"
     mu, sigma = actor.apply(actor_params, obs)
     return actor_distribution(mu, sigma)  # type: ignore[arg-type]
 
@@ -343,7 +332,6 @@ def main() -> None:
     np.random.seed(500)
 
     ppo = Ppo(observation_size, action_size, config, rng)
-    normalize = Normalize(observation_size)
     episodes: int = 0
 
     for i in range(1, config.num_iterations + 1):
@@ -365,7 +353,7 @@ def main() -> None:
 
             rng, subrng = jax.random.split(rng)
             states = reset_fn(subrng)
-            obs = jax.device_put(normalize(states.obs))
+            obs = jax.device_put(states.obs)
             score = jnp.zeros(config.num_envs)
 
             for _ in range(config.max_steps):
@@ -406,7 +394,6 @@ def main() -> None:
 
         # Save video for this iteration
         if args.save_video_every and i % args.save_video_every == 0 and rollout:
-            print(len(rollout))
             images = jnp.array(
                 env.render(rollout[:: args.render_every], camera="side", width=args.width, height=args.height)
             )

@@ -14,6 +14,7 @@ from train import Actor, choose_action
 
 
 def load_models(actor_path: str, critic_path: str) -> Tuple[Array, Array]:
+    """Loads the pretrained actor and critic models from paths."""
     with open(actor_path, "rb") as f:
         actor_params = pickle.load(f)
     with open(critic_path, "rb") as f:
@@ -22,6 +23,7 @@ def load_models(actor_path: str, critic_path: str) -> Tuple[Array, Array]:
 
 
 def main() -> None:
+    """Runs inference with pretrained models."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--actor_path", type=str, default="actor_params.pkl", help="path to actor model")
     parser.add_argument("--critic_path", type=str, default="critic_params.pkl", help="path to critic model")

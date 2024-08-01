@@ -22,6 +22,7 @@ class HumanoidEnv(PipelineEnv):
     reset_noise_scale: float = 2e-4
 
     def __init__(self) -> None:
+        """Initializes system with initial joint positions, action size, the model, and update rate."""
         path: str = os.path.join(os.path.dirname(__file__), "environments", "stompy", "legs.xml")
         mj_model: mujoco.MjModel = mujoco.MjModel.from_xml_path(path)
         # mj_data: mujoco.MjData = mujoco.MjData(mj_model)
@@ -53,12 +54,11 @@ class HumanoidEnv(PipelineEnv):
         return State(state, obs, reward, done, metrics)
 
     def step(self, env_state: State, action: jp.ndarray) -> State:
-        """Run one timestep of the environment's dynamics."""
+        """Run one timestep of the environment's dynamics and returns observations with rewards."""
         state = env_state.pipeline_state
         next_state = self.pipeline_step(state, action)
         obs = self.get_obs(state, action)
 
-        # Reward function: encourage standing
         reward = self.compute_reward(state, next_state, action)
 
         # Termination condition
@@ -93,20 +93,20 @@ class HumanoidEnv(PipelineEnv):
 
     def is_done(self, state: MjxState) -> jp.ndarray:
         """Check if the episode should terminate."""
+
         # Get the height of the robot's center of mass
-        com_height = state.q[2]  # Assuming the 3rd element is the z-position
+        com_height = state.q[2]  
 
         # Set a termination threshold
-        termination_height = -1.5  # For example, 50% of the initial height
+        termination_height = -1.5
 
         # Episode is done if the robot falls below the termination height
         done = jp.where(com_height < termination_height, 1.0, 0.0)
 
         return done
 
-    # details you want to pass through to the actor/critic model
     def get_obs(self, data: MjxState, action: jp.ndarray) -> jp.ndarray:
-        """Returns the observation of the environment."""
+        """Returns the observation of the environment to pass to actor/critic model."""
         position = data.qpos
         position = position[2:]  # excludes "current positions"
 
