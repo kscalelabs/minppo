@@ -1,6 +1,7 @@
 """Trains a policy network to get a humanoid to stand up."""
 
 import argparse
+import logging
 import os
 from dataclasses import dataclass, field
 from functools import partial
@@ -16,11 +17,8 @@ from brax.mjx.base import State as MjxState
 from flax import linen as nn
 from jax import Array
 from tqdm import tqdm
-import logging
 
 from environment import HumanoidEnv
-
-# TODO: 3. Use Equinox
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +28,8 @@ class Config:
     lr_actor: float = field(default=3e-4)
     lr_critic: float = field(default=3e-4)
     num_iterations: int = field(default=15000)
-    num_envs: int = field(default=16)
-    max_steps: int = field(default=10000)
+    num_envs: int = field(default=2048)
+    max_steps: int = field(default=2048 * 1000)
     max_steps_per_epoch: int = field(default=16384)
     gamma: float = field(default=0.98)
     lambd: float = field(default=0.98)
@@ -241,12 +239,6 @@ class Normalize:
         x = jnp.clip(x, -5, +5)
         return x
 
-# specifically for rendering video
-def unwrap_state_vectorization(state, config):
-    if config.num_envs == 1:
-        return state
-    # Get all attributes of the state
-    attributes = dir(state)
 
 def unwrap_state_vectorization(state: State, config: Config) -> State:
     unwrapped_rollout = []

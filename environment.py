@@ -1,5 +1,7 @@
 """Definition of base humanoids environment with reward system and termination conditions."""
 
+import argparse
+import logging
 import os
 from typing import Any
 
@@ -17,6 +19,7 @@ logger = logging.getLogger(__name__)
 class HumanoidEnv(PipelineEnv):
     initial_qpos: jp.ndarray
     _action_size: int
+    reset_noise_scale: float = 2e-4
 
     def __init__(self) -> None:
         path: str = os.path.join(os.path.dirname(__file__), "environments", "stompy", "legs.xml")
@@ -36,8 +39,8 @@ class HumanoidEnv(PipelineEnv):
 
         low, hi = -self.reset_noise_scale, self.reset_noise_scale
 
-        qpos = self.sys.qpos0 + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
-        # qpos = self.initial_qpos + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
+        # qpos = self.sys.qpos0 + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
+        qpos = self.initial_qpos + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
         qvel = jax.random.uniform(rng2, (self.sys.nv,), minval=low, maxval=hi)
 
         # initialize mjx state
@@ -65,11 +68,11 @@ class HumanoidEnv(PipelineEnv):
 
     def compute_reward(self, state: MjxState, next_state: MjxState, action: jp.ndarray) -> jp.ndarray:
         """Compute the reward for standing and height."""
-        min_z, max_z = -0.345, 0
+        min_z, max_z = -1.5, 2.0
         is_healthy = jp.where(state.qpos[2] < min_z, 0.0, 1.0)
         is_healthy = jp.where(state.qpos[2] > max_z, 0.0, is_healthy)
 
-        ctrl_cost = -jp.sum(jp.square(action))
+        # ctrl_cost = -jp.sum(jp.square(action))
 
         xpos = state.subtree_com[1][0]
         next_xpos = next_state.subtree_com[1][0]
@@ -94,7 +97,7 @@ class HumanoidEnv(PipelineEnv):
         com_height = state.q[2]  # Assuming the 3rd element is the z-position
 
         # Set a termination threshold
-        termination_height = -0.35  # For example, 50% of the initial height
+        termination_height = -1.5  # For example, 50% of the initial height
 
         # Episode is done if the robot falls below the termination height
         done = jp.where(com_height < termination_height, 1.0, 0.0)
@@ -121,15 +124,61 @@ class HumanoidEnv(PipelineEnv):
 
 def run_environment_adhoc() -> None:
     """Runs the environment for a few steps with random actions, for debugging."""
+    import mediapy as media
+    from tqdm import tqdm
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n_frames", type=int, default=1)
-    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--actor_path", type=str, default="actor_params.pkl", help="path to actor model")
+    parser.add_argument("--critic_path", type=str, default="critic_params.pkl", help="path to critic model")
+    parser.add_argument("--num_episodes", type=int, default=20, help="number of episodes to run")
+    parser.add_argument("--max_steps", type=int, default=200, help="maximum steps per episode")
+    parser.add_argument("--video_path", type=str, default="inference_video.mp4", help="path to save video")
+    parser.add_argument("--render_every", type=int, default=2, help="how many frames to skip between renders")
+    parser.add_argument("--video_length", type=float, default=10.0, help="desired length of video in seconds")
+    parser.add_argument("--width", type=int, default=640, help="width of the video frame")
+    parser.add_argument("--height", type=int, default=480, help="height of the video frame")
     args = parser.parse_args()
 
-    # TODO: 1. Fill this out and make sure it works in isolation.
+    env = HumanoidEnv()
+    action_size = env.action_size
 
-    raise NotImplementedError
+    rng = jax.random.PRNGKey(0)
+    reset_fn = jax.jit(env.reset)
+    step_fn = jax.jit(env.step)
+
+    fps = int(1 / env.dt)
+    max_frames = int(args.video_length * fps)
+    rollout = []
+
+    for episode in range(args.num_episodes):
+        rng, _ = jax.random.split(rng)
+        state = reset_fn(rng)
+
+        total_reward = 0
+
+        for step in tqdm(range(args.max_steps), desc=f"Episode {episode + 1} Steps", leave=False):
+            if len(rollout) < args.video_length * fps:
+                rollout.append(state.pipeline_state)
+
+            action = jax.random.uniform(rng, (action_size,), minval=-1.0, maxval=1.0)  # placeholder for an action
+            state = step_fn(state, action)
+            total_reward += state.reward
+
+            if state.done:
+                break
+
+        logging.info(f"Episode {episode + 1} total reward: {total_reward}")
+
+        if len(rollout) >= max_frames:
+            break
+
+    # Trim rollout to desired length
+    rollout = rollout[:max_frames]
+
+    images = jp.array(env.render(rollout[:: args.render_every], camera="side", width=args.width, height=args.height))
+    logging.info(f"Rendering video with {len(images)} frames at {fps} fps")
+    media.write_video(args.video_path, images, fps=fps)
+    logging.info(f"Video saved to {args.video_path}")
 
 
 if __name__ == "__main__":
