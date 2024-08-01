@@ -14,21 +14,19 @@ import numpy as np
 import optax
 from brax.envs import State
 from brax.mjx.base import State as MjxState
-from flax import linen as nn
+from flax import linen as nn  # TODO: Remove Flax dependency, replace with Equinox (like in MNIST)
 from jax import Array
 from tqdm import tqdm
 
 from environment import HumanoidEnv
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
-)
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class Config:
-    lr_actor: float = field(default=3e-4)
+    # TODO: Add comments for each of these fields. I did the first one for you.
+    lr_actor: float = field(default=3e-4, metadata={"help": "Learning rate for the actor network."})
     lr_critic: float = field(default=3e-4)
     num_iterations: int = field(default=15000)
     num_envs: int = field(default=2048)
@@ -39,6 +37,30 @@ class Config:
     batch_size: int = field(default=64)
     epsilon: float = field(default=0.2)
     l2_rate: float = field(default=0.001)
+
+
+class Actor(nn.Module):
+    """Actor network for PPO."""
+
+    action_size: int
+
+    @nn.compact
+    def __call__(self, x: Array) -> Tuple[Array, Array]:
+        x = nn.tanh(nn.Dense(64)(x))
+        x = nn.tanh(nn.Dense(64)(x))
+        mu = nn.Dense(self.action_size, kernel_init=nn.initializers.constant(0.1))(x)
+        log_sigma = nn.Dense(self.action_size)(x)
+        return mu, jnp.exp(log_sigma)
+
+
+class Critic(nn.Module):
+    """Critic network for PPO."""
+
+    @nn.compact
+    def __call__(self, x: Array) -> Array:
+        x = nn.tanh(nn.Dense(64)(x))
+        x = nn.tanh(nn.Dense(64)(x))
+        return nn.Dense(1, kernel_init=nn.initializers.constant(0.1))(x)
 
 
 class Ppo:
@@ -90,6 +112,10 @@ def train_step(
     values = critic_apply(critic_params, states_b).squeeze()
     returns, advants = get_gae(rewards_b, masks_b, values, config)
 
+    # TODO: 1. Change `old_mu` to something like `old_mu_btc` where `b` is the batch size, `t` is the number
+    # of timesteps, and `c` is the channel dimension (obviously this isn't actually the shape of the tensor,
+    # it just makes it way faster to read through the code and understand what is happening). Ditto for the other
+    # variables in this function.
     old_mu, old_std = actor_apply(actor_params, states_b)
     old_log_prob = actor_log_prob(old_mu, old_std, actions_b)
 
@@ -103,6 +129,7 @@ def train_step(
         ratio = jnp.exp(new_log_prob - old_log_prob)
         surrogate_loss = ratio * advants
 
+        # TODO: Add a comment for why we do this clipping.
         clipped_loss = jnp.clip(ratio, 1.0 - config.epsilon, 1.0 + config.epsilon) * advants
         actor_loss = -jnp.mean(jnp.minimum(surrogate_loss, clipped_loss))
         return actor_loss
@@ -211,30 +238,6 @@ def actor_distribution(mu: Array, sigma: Array) -> Array:
     return jax.random.normal(jax.random.PRNGKey(0), shape=mu.shape) * sigma + mu
 
 
-class Actor(nn.Module):
-    """Actor network for PPO."""
-
-    action_size: int
-
-    @nn.compact
-    def __call__(self, x: Array) -> Tuple[Array, Array]:
-        x = nn.tanh(nn.Dense(64)(x))
-        x = nn.tanh(nn.Dense(64)(x))
-        mu = nn.Dense(self.action_size, kernel_init=nn.initializers.constant(0.1))(x)
-        log_sigma = nn.Dense(self.action_size)(x)
-        return mu, jnp.exp(log_sigma)
-
-
-class Critic(nn.Module):
-    """Critic network for PPO."""
-
-    @nn.compact
-    def __call__(self, x: Array) -> Array:
-        x = nn.tanh(nn.Dense(64)(x))
-        x = nn.tanh(nn.Dense(64)(x))
-        return nn.Dense(1, kernel_init=nn.initializers.constant(0.1))(x)
-
-
 def unwrap_state_vectorization(state: State, config: Config) -> State:
     """Unwraps one environment the vectorized rollout so that the frames in videos are correctly ordered."""
     unwrapped_rollout = []
@@ -295,6 +298,12 @@ def update_memory(memory: Dict[str, Array], new_data: Dict[str, Array]) -> Dict[
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--env_name", type=str, default="Humanoid-v2", help="name of environmnet to put into logs")
     parser.add_argument("--render", action="store_true", help="render the environment")

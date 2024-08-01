@@ -7,8 +7,7 @@ tqdm
 jax
 brax
 optax
-flax
-mediapy
+equinox
 
 # Configuration management.
 omegaconf

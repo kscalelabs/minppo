@@ -17,22 +17,34 @@ logger = logging.getLogger(__name__)
 
 
 class HumanoidEnv(PipelineEnv):
+    """Defines the environment for controlling a humanoid robot.
+
+    This environment uses Brax's `mjcf` module to load a MuJoCo model of a
+    humanoid robot, which can then be controlled using the `PipelineEnv` API.
+
+    Parameters:
+        n_frames: The number of times to step the physics pipeline for each
+            environment step. Setting this value to be greater than 1 means
+            that the policy will run at a lower frequency than the physics
+            simulation.
+    """
+
     initial_qpos: jp.ndarray
     _action_size: int
     reset_noise_scale: float = 2e-4
 
-    def __init__(self) -> None:
+    def __init__(self, n_frames: int = 1) -> None:
         """Initializes system with initial joint positions, action size, the model, and update rate."""
+        # TODO: This model is not available by default.
+        # Instead, we need this class to automatically download the model
+        # (preferrably the Unitree G1 model) and cache it somewhere locally.
         path: str = os.path.join(os.path.dirname(__file__), "environments", "stompy", "legs.xml")
         mj_model: mujoco.MjModel = mujoco.MjModel.from_xml_path(path)
-        # mj_data: mujoco.MjData = mujoco.MjData(mj_model)
-        # renderer: mujoco.Renderer = mujoco.Renderer(mj_model)
         self.initial_qpos = jp.array(mj_model.keyframe("default").qpos)
         self._action_size = mj_model.nu
         sys: base.System = mjcf.load_model(mj_model)
 
-        physics_steps_per_control_step: int = 4
-        super().__init__(sys, n_frames=physics_steps_per_control_step, backend="mjx")
+        super().__init__(sys, n_frames=n_frames, backend="mjx")
 
     def reset(self, rng: jp.ndarray) -> State:
         """Resets the environment to an initial state."""
@@ -123,8 +135,11 @@ class HumanoidEnv(PipelineEnv):
 
 def run_environment_adhoc() -> None:
     """Runs the environment for a few steps with random actions, for debugging."""
-    import mediapy as media
-    from tqdm import tqdm
+    try:
+        import mediapy as media
+        from tqdm import tqdm
+    except ImportError:
+        raise ImportError("Please install `mediapy` and `tqdm` to run this script")
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--actor_path", type=str, default="actor_params.pkl", help="path to actor model")
@@ -181,4 +196,5 @@ def run_environment_adhoc() -> None:
 
 
 if __name__ == "__main__":
+    # python environment.py
     run_environment_adhoc()
