@@ -2,7 +2,7 @@
 
 import argparse
 import pickle
-from typing import Tuple
+from typing import Any, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -43,7 +43,7 @@ def main() -> None:
 
     fps = int(1 / env.dt)
     max_frames = int(args.video_length * fps)
-    rollout = []
+    rollout: list[Any] = []
 
     for episode in range(args.num_episodes):
         rng = jax.random.PRNGKey(episode)

@@ -25,7 +25,7 @@ def load_mnist() -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
 class DenseModel(eqx.Module):
     layers: list
 
-    def __init__(self, key: jax.random.PRNGKey) -> None:
+    def __init__(self, key: jnp.ndarray) -> None:
         keys = random.split(key, 3)
         self.layers = [
             eqx.nn.Linear(28 * 28, 128, key=keys[0]),
