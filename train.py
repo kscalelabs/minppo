@@ -22,18 +22,17 @@ from environment import HumanoidEnv
 
 @dataclass
 class Config:
-    lr_actor: float = field(default=3e-5)
-    lr_critic: float = field(default=3e-5)
+    lr_actor: float = field(default=3e-4)
+    lr_critic: float = field(default=3e-4)
     num_iterations: int = field(default=15000)
     num_envs: int = field(default=16)
     max_steps: int = field(default=10000)
     max_steps_per_epoch: int = field(default=16384)
     gamma: float = field(default=0.98)
-    lambd: float = field(default=0.95)
+    lambd: float = field(default=0.98)
     batch_size: int = field(default=64)
     epsilon: float = field(default=0.2)
     l2_rate: float = field(default=0.001)
-    entropy_coef: float = field(default=0.001)
     beta: int = field(default=3)
 
 
@@ -238,6 +237,12 @@ class Normalize:
         x = jnp.clip(x, -5, +5)
         return x
 
+# specifically for rendering video
+def unwrap_state_vectorization(state, config):
+    if config.num_envs == 1:
+        return state
+    # Get all attributes of the state
+    attributes = dir(state)
 
 def unwrap_state_vectorization(state: State, config: Config) -> State:
     unwrapped_rollout = []
