@@ -68,37 +68,36 @@ class HumanoidEnv(PipelineEnv):
 
     def compute_reward(self, state: MjxState, next_state: MjxState, action: jp.ndarray) -> jp.ndarray:
         """Compute the reward for standing and height."""
-        min_z, max_z = -1.5, 2.0
-        is_healthy = jp.where(state.qpos[2] < min_z, 0.0, 1.0)
-        is_healthy = jp.where(state.qpos[2] > max_z, 0.0, is_healthy)
+        min_z, max_z = -1, 2.0
+        is_healthy = jp.where(state.q[2] < min_z, 0.0, 1.0)
+        is_healthy = jp.where(state.q[2] > max_z, 0.0, is_healthy)
 
-        # ctrl_cost = -jp.sum(jp.square(action))
+        ctrl_cost = -jp.sum(jp.square(action))
 
         xpos = state.subtree_com[1][0]
         next_xpos = next_state.subtree_com[1][0]
         velocity = (next_xpos - xpos) / self.dt
 
-        # jax.debug.print(
-        #     "velocity {}, xpos {}, next_xpos {}",
-        #     velocity,
-        #     xpos,
-        #     next_xpos,
-        #     ordered=True,
-        # )
-        # jax.debug.print("is_healthy {}, height {}", is_healthy, state.q[2], ordered=True)
+        jax.debug.print(
+            "velocity {}, xpos {}, next_xpos {}",
+            velocity,
+            xpos,
+            next_xpos,
+            ordered=True,
+        )
+        jax.debug.print("is_healthy {}, height {}", is_healthy, state.q[2], ordered=True)
 
-        total_reward = 5.0 * is_healthy + 1.25 * velocity
+        total_reward = 5.0 * is_healthy + 1.25 * velocity + 0.1 * ctrl_cost
 
         return total_reward
 
     def is_done(self, state: MjxState) -> jp.ndarray:
         """Check if the episode should terminate."""
-
         # Get the height of the robot's center of mass
-        com_height = state.q[2]  
+        com_height = state.q[2]
 
         # Set a termination threshold
-        termination_height = -1.5
+        termination_height = -1
 
         # Episode is done if the robot falls below the termination height
         done = jp.where(com_height < termination_height, 1.0, 0.0)

@@ -32,7 +32,7 @@ class Config:
     lr_critic: float = field(default=3e-4)
     num_iterations: int = field(default=15000)
     num_envs: int = field(default=2048)
-    max_steps: int = field(default=2048 * 1000)
+    max_steps: int = field(default=2048)
     max_steps_per_epoch: int = field(default=16384)
     gamma: float = field(default=0.98)
     lambd: float = field(default=0.98)
@@ -381,6 +381,7 @@ def main() -> None:
                     unwrapped_states = unwrap_state_vectorization(states.pipeline_state, config)
                     rollout.extend(unwrapped_states)
 
+                print(dones)
                 if jnp.all(dones):
                     break
 
