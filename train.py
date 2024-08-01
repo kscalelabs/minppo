@@ -78,25 +78,25 @@ def train_step(
     actor_optim: optax.GradientTransformation,
     critic_optim: optax.GradientTransformation,
     params: Dict[str, Any],
-    states: Array,
-    actions: Array,
-    rewards: Array,
-    masks: Array,
+    states_b: Array,
+    actions_b: Array,
+    rewards_b: Array,
+    masks_b: Array,
     config: Config,
 ) -> Tuple[Dict[str, Any], Array, Array]:
     """Perform a single training step with PPO parameters."""
     actor_params, critic_params, actor_opt_state, critic_opt_state = params.values()
 
-    values = critic_apply(critic_params, states).squeeze()
-    returns, advants = get_gae(rewards, masks, values, config)
+    values = critic_apply(critic_params, states_b).squeeze()
+    returns, advants = get_gae(rewards_b, masks_b, values, config)
 
-    old_mu, old_std = actor_apply(actor_params, states)
-    old_log_prob = actor_log_prob(old_mu, old_std, actions)
+    old_mu, old_std = actor_apply(actor_params, states_b)
+    old_log_prob = actor_log_prob(old_mu, old_std, actions_b)
 
     def actor_loss_fn(params: Array) -> Array:
         """Prioritizing advantagous actions over more training, clipping to prevent too much change."""
-        mu, std = actor_apply(params, states)
-        new_log_prob = actor_log_prob(mu, std, actions)
+        mu, std = actor_apply(params, states_b)
+        new_log_prob = actor_log_prob(mu, std, actions_b)
 
         # Loss is defined by amount of change to improved state
         # Multiplied with amount of improvement
@@ -109,7 +109,7 @@ def train_step(
 
     def critic_loss_fn(params: Array) -> Array:
         """Prioritizing being able to predict the ground truth returns."""
-        critic_returns = critic_apply(params, states).squeeze()
+        critic_returns = critic_apply(params, states_b).squeeze()
         critic_loss = jnp.mean((critic_returns - returns) ** 2)
         return critic_loss
 
@@ -180,10 +180,10 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
 
             # Batching the data
             batch_indices = arr[config.batch_size * i : config.batch_size * (i + 1)]
-            b_states = states[batch_indices]
-            b_actions = actions[batch_indices]
-            b_rewards = rewards[batch_indices]
-            b_masks = masks[batch_indices]
+            states_b = states[batch_indices]
+            actions_b = actions[batch_indices]
+            rewards_b = rewards[batch_indices]
+            masks_b = masks[batch_indices]
 
             params = ppo.get_params()
             new_params, actor_loss, critic_loss = train_step(
@@ -192,10 +192,10 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
                 ppo.actor_optim,
                 ppo.critic_optim,
                 params,
-                b_states,
-                b_actions,
-                b_rewards,
-                b_masks,
+                states_b,
+                actions_b,
+                rewards_b,
+                masks_b,
                 config,
             )
             ppo.update_params(new_params)
