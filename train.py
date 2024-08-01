@@ -22,17 +22,18 @@ from environment import HumanoidEnv
 
 @dataclass
 class Config:
-    lr_actor: float = field(default=3e-6)
-    lr_critic: float = field(default=3e-6)
+    lr_actor: float = field(default=3e-5)
+    lr_critic: float = field(default=3e-5)
     num_iterations: int = field(default=15000)
     num_envs: int = field(default=16)
     max_steps: int = field(default=10000)
     max_steps_per_epoch: int = field(default=16384)
     gamma: float = field(default=0.98)
-    lambd: float = field(default=0.98)
-    batch_size: int = field(default=16)
+    lambd: float = field(default=0.95)
+    batch_size: int = field(default=64)
     epsilon: float = field(default=0.2)
     l2_rate: float = field(default=0.001)
+    entropy_coef: float = field(default=0.001)
     beta: int = field(default=3)
 
 

@@ -17,12 +17,6 @@ We love your input! We want to make contributing to this project as easy and tra
 
 Unsure where to begin contributing to our code? You can start by looking through the "TODO" list in the README.md or looking at the issues 
 
-
-## Setting Up Development Environment
-
-The repository is currently (and purposefully) very lightweight. `requirements.txt` is all you need! If you come acros any errors regarding MuJoCo's rendering, you may have to `export DISPLAY=:0` on a headless environment utilizing `xvfb`. If you are still getting errors, try `export MUJOCO_GL=egl`
-
-
 ## Pull Request Process
 
 1. Ensure any install or build dependencies are removed before the end of the layer when doing a build through `pip install -r requirements.txt`.
@@ -36,3 +30,14 @@ To run linting, use:
 black *.py
 ruff check --fix *.py
 ```
+
+## Setting Up Development Environment
+
+The repository is currently (and purposefully) very lightweight. `requirements.txt` is all you need! If you come acros any errors regarding MuJoCo's rendering, you may have to `export DISPLAY=:0` on a headless environment utilizing `xvfb`. If you are still getting errors, try `export MUJOCO_GL=egl`
+
+
+## Community and Communication
+
+For major changes, please open an issue first to discuss what you would like to change. Please make sure to update tests as appropriate, and try to reduce verbosity and annotate your code as much as possible
+
+Thank you for contributing!
