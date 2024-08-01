@@ -11,6 +11,8 @@ from brax.envs.base import PipelineEnv, State
 from brax.io import mjcf
 from brax.mjx.base import State as MjxState
 
+logger = logging.getLogger(__name__)
+
 
 class HumanoidEnv(PipelineEnv):
     initial_qpos: jp.ndarray
@@ -115,3 +117,20 @@ class HumanoidEnv(PipelineEnv):
                 data.qfrc_actuator,
             ]
         )
+
+
+def run_environment_adhoc() -> None:
+    """Runs the environment for a few steps with random actions, for debugging."""
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--n_frames", type=int, default=1)
+    parser.add_argument("--debug", action="store_true")
+    args = parser.parse_args()
+
+    # TODO: 1. Fill this out and make sure it works in isolation.
+
+    raise NotImplementedError
+
+
+if __name__ == "__main__":
+    run_environment_adhoc()
