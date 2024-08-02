@@ -3,6 +3,10 @@
 import argparse
 import logging
 import os
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import jax
@@ -14,6 +18,47 @@ from brax.io import mjcf
 from brax.mjx.base import State as MjxState
 
 logger = logging.getLogger(__name__)
+
+
+def download_model_files(repo_url: str, repo_dir: str, local_path: str) -> None:
+    """Downloads or updates model files (XML + meshes) from a GitHub repository.
+
+    Args:
+        repo_url: The URL of the GitHub repository.
+        repo_dir: The directory within the repository containing the model files.
+        local_path: The local path where files should be saved.
+
+    Returns:
+        None
+    """
+    target_path = Path(local_path) / repo_dir
+
+    # Check if the target directory already exists
+    if target_path.exists():
+        logger.info(f"Model files are already present in {target_path}. Skipping download.")
+        return
+
+    # Create a temporary directory for cloning
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+
+        # Clone the repository into the temporary directory
+        subprocess.run(["git", "clone", "--depth", "1", repo_url, temp_dir], check=True)
+
+        # Path to the repo_dir in the temporary directory
+        temp_repo_dir_path = temp_path / repo_dir
+
+        if temp_repo_dir_path.exists():
+            # If the target directory does not exist, create it
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            # Move the repo_dir from the temporary directory to the target path
+            if target_path.exists():
+                # If the target path exists, remove it first (to avoid FileExistsError)
+                shutil.rmtree(target_path)
+            shutil.move(str(temp_repo_dir_path), str(target_path.parent))
+            logger.info(f"Model files downloaded to {target_path}")
+        else:
+            logger.info(f"The directory {repo_dir} does not exist in the repository.")
 
 
 class HumanoidEnv(PipelineEnv):
@@ -31,16 +76,27 @@ class HumanoidEnv(PipelineEnv):
 
     initial_qpos: jp.ndarray
     _action_size: int
-    reset_noise_scale: float = 2e-4
+    reset_noise_scale: float = 0
 
     def __init__(self, n_frames: int = 1) -> None:
         """Initializes system with initial joint positions, action size, the model, and update rate."""
-        # TODO: This model is not available by default.
-        # Instead, we need this class to automatically download the model
-        # (preferrably the Unitree G1 model) and cache it somewhere locally.
-        path: str = os.path.join(os.path.dirname(__file__), "environments", "stompy", "legs.xml")
-        mj_model: mujoco.MjModel = mujoco.MjModel.from_xml_path(path)
-        self.initial_qpos = jp.array(mj_model.keyframe("default").qpos)
+        # GitHub repository URL
+        repo_url = "https://github.com/nathanjzhao/mujoco-models.git"
+
+        # Directory within the repository containing the model files
+        repo_dir = "humanoid"
+
+        # Local path where the files should be saved
+        environments_path = os.path.join(os.path.dirname(__file__), "environments")
+
+        # Download or update the model files
+        download_model_files(repo_url, repo_dir, environments_path)
+
+        # Now use the local path to load the model
+        xml_path = os.path.join(environments_path, repo_dir, "humanoid.xml")
+        mj_model: mujoco.MjModel = mujoco.MjModel.from_xml_path(xml_path)
+        # self.initial_qpos = jp.array(mj_model.keyframe("default").qpos)
+
         self._action_size = mj_model.nu
         sys: base.System = mjcf.load_model(mj_model)
 
@@ -52,8 +108,8 @@ class HumanoidEnv(PipelineEnv):
 
         low, hi = -self.reset_noise_scale, self.reset_noise_scale
 
-        # qpos = self.sys.qpos0 + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
-        qpos = self.initial_qpos + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
+        qpos = self.sys.qpos0 + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
+        # qpos = self.initial_qpos + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
         qvel = jax.random.uniform(rng2, (self.sys.nv,), minval=low, maxval=hi)
 
         # initialize mjx state
@@ -80,26 +136,29 @@ class HumanoidEnv(PipelineEnv):
 
     def compute_reward(self, state: MjxState, next_state: MjxState, action: jp.ndarray) -> jp.ndarray:
         """Compute the reward for standing and height."""
-        min_z, max_z = -1, 2.0
+        min_z, max_z = 0.7, 2.0
+        # min_z, max_z = -0.35, 2.0
         is_healthy = jp.where(state.q[2] < min_z, 0.0, 1.0)
         is_healthy = jp.where(state.q[2] > max_z, 0.0, is_healthy)
 
+        is_bad = jp.where(state.q[2] < min_z + 0.2, 1.0, 0.0)
+
         ctrl_cost = -jp.sum(jp.square(action))
 
-        xpos = state.subtree_com[1][0]
-        next_xpos = next_state.subtree_com[1][0]
-        velocity = (next_xpos - xpos) / self.dt
+        # xpos = state.subtree_com[1][0]
+        # next_xpos = next_state.subtree_com[1][0]
+        # velocity = (next_xpos - xpos) / self.dt
 
-        jax.debug.print(
-            "velocity {}, xpos {}, next_xpos {}",
-            velocity,
-            xpos,
-            next_xpos,
-            ordered=True,
-        )
-        jax.debug.print("is_healthy {}, height {}", is_healthy, state.q[2], ordered=True)
+        # jax.debug.print(
+        #     "velocity {}, xpos {}, next_xpos {}",
+        #     velocity,
+        #     xpos,
+        #     next_xpos,
+        #     ordered=True,
+        # )
+        # jax.debug.print("is_healthy {}, height {}", is_healthy, state.q[2], ordered=True)
 
-        total_reward = 5.0 * is_healthy + 1.25 * velocity + 0.1 * ctrl_cost
+        total_reward = 2.0 * is_healthy + 0.1 * ctrl_cost - 5.0 * is_bad
 
         return total_reward
 
@@ -109,7 +168,8 @@ class HumanoidEnv(PipelineEnv):
         com_height = state.q[2]
 
         # Set a termination threshold
-        termination_height = -1
+        termination_height = 0.7
+        # termination_height = -0.35
 
         # Episode is done if the robot falls below the termination height
         done = jp.where(com_height < termination_height, 1.0, 0.0)

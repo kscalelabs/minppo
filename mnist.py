@@ -41,7 +41,6 @@ class DenseModel(eqx.Module):
         ]
 
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        # TODO: 1. Add shape suffix to tensor variable names.
         for layer in self.layers[:-1]:
             x = jax.nn.relu(layer(x))
         return self.layers[-1](x)
@@ -99,8 +98,6 @@ def accuracy(model: DenseModel, x_b: jnp.ndarray, y_b: jnp.ndarray) -> jnp.ndarr
 
 
 def main() -> None:
-    # TODO: 1. Add shape suffix to tensor variable names.
-
     # Load data
     x_train, y_train, x_test, y_test = load_mnist()
 

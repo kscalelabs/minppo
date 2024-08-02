@@ -4,9 +4,9 @@ import argparse
 import logging
 import os
 from dataclasses import dataclass, field
-from functools import partial
-from typing import Any, Callable, Dict, List, Mapping, Tuple
+from typing import Any, Dict, List, Tuple
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import mediapy as media
@@ -14,7 +14,6 @@ import numpy as np
 import optax
 from brax.envs import State
 from brax.mjx.base import State as MjxState
-from flax import linen as nn  # TODO: Remove Flax dependency, replace with Equinox (like in MNIST)
 from jax import Array
 from tqdm import tqdm
 
@@ -25,78 +24,110 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Config:
-    # TODO: Add comments for each of these fields. I did the first one for you.
     lr_actor: float = field(default=3e-4, metadata={"help": "Learning rate for the actor network."})
-    lr_critic: float = field(default=3e-4)
-    num_iterations: int = field(default=15000)
-    num_envs: int = field(default=2048)
-    max_steps: int = field(default=2048)
-    max_steps_per_epoch: int = field(default=16384)
-    gamma: float = field(default=0.98)
-    lambd: float = field(default=0.98)
-    batch_size: int = field(default=64)
-    epsilon: float = field(default=0.2)
-    l2_rate: float = field(default=0.001)
+    lr_critic: float = field(default=3e-4, metadata={"help": "Learning rate for the critic network."})
+    num_iterations: int = field(default=15000, metadata={"help": "Number of environment simulation iterations."})
+    num_envs: int = field(default=16, metadata={"help": "Number of environments to run at once with vectorization."})
+    max_steps_per_episode: int = field(
+        default=512 * 16, metadata={"help": "Maximum number of steps per episode (across ALL environments)."}
+    )
+    max_steps_per_iteration: int = field(
+        default=1024 * 16,
+        metadata={
+            "help": "Maximum number of steps per iteration of simulating environments (across ALL environments)."
+        },
+    )
+    gamma: float = field(default=0.98, metadata={"help": "Discount factor for future rewards."})
+    lambd: float = field(default=0.99, metadata={"help": "Lambda parameter for GAE calculation."})
+    batch_size: int = field(default=64, metadata={"help": "Batch size for training updates."})
+    epsilon: float = field(default=0.2, metadata={"help": "Clipping parameter for PPO."})
+    l2_rate: float = field(default=0.001, metadata={"help": "L2 regularization rate for the critic."})
 
 
-class Actor(nn.Module):
+class Actor(eqx.Module):
     """Actor network for PPO."""
 
-    action_size: int
+    linear1: eqx.nn.Linear
+    linear2: eqx.nn.Linear
+    mu_layer: eqx.nn.Linear
+    log_sigma_layer: eqx.nn.Linear
 
-    @nn.compact
+    def __init__(self, input_size: int, action_size: int, key: Array) -> None:
+        keys = jax.random.split(key, 4)
+        self.linear1 = eqx.nn.Linear(input_size, 64, key=keys[0])
+        self.linear2 = eqx.nn.Linear(64, 64, key=keys[1])
+        self.mu_layer = eqx.nn.Linear(64, action_size, key=keys[2])
+        self.log_sigma_layer = eqx.nn.Linear(64, action_size, key=keys[3])
+
     def __call__(self, x: Array) -> Tuple[Array, Array]:
-        x = nn.tanh(nn.Dense(64)(x))
-        x = nn.tanh(nn.Dense(64)(x))
-        mu = nn.Dense(self.action_size, kernel_init=nn.initializers.constant(0.1))(x)
-        log_sigma = nn.Dense(self.action_size)(x)
+        x = jax.nn.tanh(self.linear1(x))
+        x = jax.nn.tanh(self.linear2(x))
+        mu = self.mu_layer(x)
+        log_sigma = self.log_sigma_layer(x)
         return mu, jnp.exp(log_sigma)
 
 
-class Critic(nn.Module):
+class Critic(eqx.Module):
     """Critic network for PPO."""
 
-    @nn.compact
+    linear1: eqx.nn.Linear
+    linear2: eqx.nn.Linear
+    value_layer: eqx.nn.Linear
+
+    def __init__(self, input_size: int, key: Array) -> None:
+        keys = jax.random.split(key, 3)
+        self.linear1 = eqx.nn.Linear(input_size, 64, key=keys[0])
+        self.linear2 = eqx.nn.Linear(64, 64, key=keys[1])
+        self.value_layer = eqx.nn.Linear(64, 1, key=keys[2])
+
     def __call__(self, x: Array) -> Array:
-        x = nn.tanh(nn.Dense(64)(x))
-        x = nn.tanh(nn.Dense(64)(x))
-        return nn.Dense(1, kernel_init=nn.initializers.constant(0.1))(x)
+        x = jax.nn.tanh(self.linear1(x))
+        x = jax.nn.tanh(self.linear2(x))
+        return self.value_layer(x)
 
 
 class Ppo:
     def __init__(self, observation_size: int, action_size: int, config: Config, key: Array) -> None:
         """Initialize the PPO model's actor/critic structure and optimizers."""
-        self.actor = Actor(action_size)
-        self.critic = Critic()
-        self.actor_params = self.actor.init(key, jnp.zeros((1, observation_size)))
-        self.critic_params = self.critic.init(key, jnp.zeros((1, observation_size)))
+        key, subkey1, subkey2 = jax.random.split(key, 3)
+        self.actor = Actor(observation_size, action_size, subkey1)
+        self.critic = Critic(observation_size, subkey2)
 
         self.actor_optim = optax.adam(learning_rate=config.lr_actor)
         self.critic_optim = optax.adamw(learning_rate=config.lr_critic, weight_decay=config.l2_rate)
 
-        self.actor_opt_state = self.actor_optim.init(self.actor_params)
-        self.critic_opt_state = self.critic_optim.init(self.critic_params)
+        # Initialize optimizer states
+        self.actor_opt_state = self.actor_optim.init(eqx.filter(self.actor, eqx.is_array))
+        self.critic_opt_state = self.critic_optim.init(eqx.filter(self.critic, eqx.is_array))
 
     def get_params(self) -> Dict[str, Any]:
         """Get the parameters of the PPO model."""
         return {
-            "actor_params": self.actor_params,
-            "critic_params": self.critic_params,
+            "actor": self.actor,
+            "critic": self.critic,
             "actor_opt_state": self.actor_opt_state,
             "critic_opt_state": self.critic_opt_state,
         }
 
     def update_params(self, new_params: Dict[str, Any]) -> None:
         """Update the parameters of the PPO model."""
-        self.actor_params = new_params["actor_params"]
-        self.critic_params = new_params["critic_params"]
+        self.actor = new_params["actor"]
+        self.critic = new_params["critic"]
         self.actor_opt_state = new_params["actor_opt_state"]
         self.critic_opt_state = new_params["critic_opt_state"]
 
 
+@jax.jit
+def apply_critic(critic: Critic, state: Array) -> Array:
+    return critic(state)
+
+
+@jax.jit
+def apply_actor(actor: Critic, state: Array) -> Array:
+    return actor(state)
+
+
 def train_step(
-    actor_apply: Callable[[Any, Array], Tuple[Array, Array]],
-    critic_apply: Callable[[Any, Array], Array],
     actor_optim: optax.GradientTransformation,
     critic_optim: optax.GradientTransformation,
     params: Dict[str, Any],
@@ -107,54 +138,51 @@ def train_step(
     config: Config,
 ) -> Tuple[Dict[str, Any], Array, Array]:
     """Perform a single training step with PPO parameters."""
-    actor_params, critic_params, actor_opt_state, critic_opt_state = params.values()
+    actor, critic, actor_opt_state, critic_opt_state = params.values()
 
-    values = critic_apply(critic_params, states_b).squeeze()
-    returns, advants = get_gae(rewards_b, masks_b, values, config)
+    actor_vmap = jax.vmap(apply_actor, in_axes=(None, 0))
+    critic_vmap = jax.vmap(apply_critic, in_axes=(None, 0))
 
-    # TODO: 1. Change `old_mu` to something like `old_mu_btc` where `b` is the batch size, `t` is the number
-    # of timesteps, and `c` is the channel dimension (obviously this isn't actually the shape of the tensor,
-    # it just makes it way faster to read through the code and understand what is happening). Ditto for the other
-    # variables in this function.
-    old_mu, old_std = actor_apply(actor_params, states_b)
-    old_log_prob = actor_log_prob(old_mu, old_std, actions_b)
+    values_b = critic_vmap(critic, states_b).squeeze()
+    returns_b, advants_b = get_gae(rewards_b, masks_b, values_b, config)
 
-    def actor_loss_fn(params: Array) -> Array:
-        """Prioritizing advantagous actions over more training, clipping to prevent too much change."""
-        mu, std = actor_apply(params, states_b)
-        new_log_prob = actor_log_prob(mu, std, actions_b)
+    old_mu_b, old_std_b = actor_vmap(actor, states_b)
+    old_log_prob_b = actor_log_prob(old_mu_b, old_std_b, actions_b)
 
-        # Loss is defined by amount of change to improved state
-        # Multiplied with amount of improvement
-        ratio = jnp.exp(new_log_prob - old_log_prob)
-        surrogate_loss = ratio * advants
+    @eqx.filter_value_and_grad
+    def actor_loss_fn(actor: Actor) -> Array:
+        """Prioritizing advantageous actions over more training."""
+        mu_b, std_b = actor_vmap(actor, states_b)
+        new_log_prob_b = actor_log_prob(mu_b, std_b, actions_b)
 
-        # TODO: Add a comment for why we do this clipping.
-        clipped_loss = jnp.clip(ratio, 1.0 - config.epsilon, 1.0 + config.epsilon) * advants
-        actor_loss = -jnp.mean(jnp.minimum(surrogate_loss, clipped_loss))
+        ratio_b = jnp.exp(new_log_prob_b - old_log_prob_b)
+        surrogate_loss_b = ratio_b * advants_b
+
+        # Clipping is done to prevent too much change if new advantages are very large
+        clipped_loss_b = jnp.clip(ratio_b, 1.0 - config.epsilon, 1.0 + config.epsilon) * advants_b
+        actor_loss = -jnp.mean(jnp.minimum(surrogate_loss_b, clipped_loss_b))
         return actor_loss
 
-    def critic_loss_fn(params: Array) -> Array:
+    @eqx.filter_value_and_grad
+    def critic_loss_fn(critic: Critic) -> Array:
         """Prioritizing being able to predict the ground truth returns."""
-        critic_returns = critic_apply(params, states_b).squeeze()
-        critic_loss = jnp.mean((critic_returns - returns) ** 2)
+        critic_returns_b = critic_vmap(critic, states_b).squeeze()
+        critic_loss = jnp.mean((critic_returns_b - returns_b) ** 2)
         return critic_loss
 
     # Calculating actor loss and updating actor parameters
-    actor_grad_fn = jax.value_and_grad(actor_loss_fn)
-    actor_loss, actor_grads = actor_grad_fn(actor_params)
-    actor_updates, new_actor_opt_state = actor_optim.update(actor_grads, actor_opt_state, actor_params)
-    new_actor_params = optax.apply_updates(actor_params, actor_updates)
+    actor_loss, actor_grads = actor_loss_fn(actor)
+    actor_updates, new_actor_opt_state = actor_optim.update(actor_grads, actor_opt_state, params=actor)
+    new_actor = eqx.apply_updates(actor, actor_updates)
 
-    # Calculating critic loss and updating actor parameters
-    critic_grad_fn = jax.value_and_grad(critic_loss_fn)
-    critic_loss, critic_grads = critic_grad_fn(critic_params)
-    critic_updates, new_critic_opt_state = critic_optim.update(critic_grads, critic_opt_state, critic_params)
-    new_critic_params = optax.apply_updates(critic_params, critic_updates)
+    # Calculating critic loss and updating critic parameters
+    critic_loss, critic_grads = critic_loss_fn(critic)
+    critic_updates, new_critic_opt_state = critic_optim.update(critic_grads, critic_opt_state, params=critic)
+    new_critic = eqx.apply_updates(critic, critic_updates)
 
     new_params = {
-        "actor_params": new_actor_params,
-        "critic_params": new_critic_params,
+        "actor": new_actor,
+        "critic": new_critic,
         "actor_opt_state": new_actor_opt_state,
         "critic_opt_state": new_critic_opt_state,
     }
@@ -203,6 +231,9 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
     for epoch in range(1):
         key, subkey = jax.random.split(key)
         arr = jax.random.permutation(subkey, arr)
+        total_actor_loss = 0.0
+        total_critic_loss = 0.0
+        logger.info("Processing %d batches", n // config.batch_size)
         for i in range(n // config.batch_size):
 
             # Batching the data
@@ -214,8 +245,6 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
 
             params = ppo.get_params()
             new_params, actor_loss, critic_loss = train_step(
-                ppo.actor.apply,  # type: ignore[arg-type]
-                ppo.critic.apply,  # type: ignore[arg-type]
                 ppo.actor_optim,
                 ppo.critic_optim,
                 params,
@@ -227,15 +256,23 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
             )
             ppo.update_params(new_params)
 
+            total_actor_loss += actor_loss.mean().item()
+            total_critic_loss += critic_loss.mean().item()
+
+        mean_actor_loss = total_actor_loss / (n // config.batch_size)
+        mean_critic_loss = total_critic_loss / (n // config.batch_size)
+
+        logger.info(f"Mean Actor Loss: {mean_actor_loss}, Mean Critic Loss: {mean_critic_loss}")
+
 
 def actor_log_prob(mu: Array, sigma: Array, actions: Array) -> Array:
     """Calculate the log probability of the actions given the actor network's output."""
     return jax.scipy.stats.norm.logpdf(actions, mu, sigma).sum(axis=-1)
 
 
-def actor_distribution(mu: Array, sigma: Array) -> Array:
+def actor_distribution(mu: Array, sigma: Array, rng: Array) -> Array:
     """Get an action from the actor network from its probability distribution of actions."""
-    return jax.random.normal(jax.random.PRNGKey(0), shape=mu.shape) * sigma + mu
+    return jax.random.normal(rng, shape=mu.shape) * sigma + mu
 
 
 def unwrap_state_vectorization(state: State, config: Config) -> State:
@@ -252,16 +289,12 @@ def unwrap_state_vectorization(state: State, config: Config) -> State:
         new_state = {}
         for attr in attributes:
             # Skip special methods and attributes
-            if (
-                not attr.startswith("_")
-                and not callable(getattr(state, attr))
-                and attr not in ["ne", "nl", "nf", "nefc"]
-            ):
+            if not attr.startswith("_") and not callable(getattr(state, attr)):
                 value = getattr(state, attr)
                 try:
                     new_state[attr] = value[i]
                 except Exception:
-                    logger.warning(f"Could not get first element of {attr}. Setting {attr} to {value}")
+                    # logger.warning(f"Could not get first element of {attr}.")
                     new_state[attr] = value
         unwrapped_rollout.append(type(state)(**new_state))
 
@@ -285,11 +318,11 @@ def screenshot(
     logger.info(f"Screenshot saved as {filename}")
 
 
-@partial(jax.jit, static_argnums=(2,))
-def choose_action(actor_params: Mapping[str, Mapping[str, Any]], obs: Array, actor: Actor) -> Array:
+@jax.jit
+def choose_action(actor: Actor, obs: Array, rng: Array) -> Array:
     # Given a state, we do our forward pass and then sample from to maintain "random actions"
-    mu, sigma = actor.apply(actor_params, obs)
-    return actor_distribution(mu, sigma)  # type: ignore[arg-type]
+    mu, sigma = apply_actor(actor, obs)
+    return actor_distribution(mu, sigma, rng)
 
 
 @jax.jit
@@ -311,7 +344,7 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=480, help="height of the video frame")
     parser.add_argument("--render_every", type=int, default=2, help="render the environment every N steps")
     parser.add_argument("--video_length", type=int, default=5, help="maxmimum length of video in seconds")
-    parser.add_argument("--save_video_every", type=int, help="save video every N iterations")
+    parser.add_argument("--save_video_every", type=int, default=100, help="save video every N iterations")
     args = parser.parse_args()
 
     config = Config()
@@ -355,18 +388,22 @@ def main() -> None:
         steps = 0
         rollout: List[MjxState] = []
 
-        pbar = tqdm(total=config.max_steps_per_epoch, desc=f"Steps for iteration {i}")
+        pbar = tqdm(total=config.max_steps_per_iteration, desc=f"Steps for iteration {i}")
 
-        while steps < config.max_steps_per_epoch:
+        while steps < config.max_steps_per_iteration:
             episodes += config.num_envs
 
-            rng, subrng = jax.random.split(rng)
-            states = reset_fn(subrng)
+            rng, reset_rng = jax.random.split(rng)
+            states = reset_fn(reset_rng)
             obs = jax.device_put(states.obs)
             score = jnp.zeros(config.num_envs)
 
-            for _ in range(config.max_steps):
-                actions = choose_action(ppo.actor_params, obs, ppo.actor)
+            for _ in range(config.max_steps_per_episode):
+
+                # Choosing actions
+                choose_action_vmap = jax.vmap(choose_action, in_axes=(None, 0, 0))
+                rng, *action_rng = jax.random.split(rng, num=config.num_envs + 1)
+                actions = choose_action_vmap(ppo.actor, obs, jnp.array(action_rng))
 
                 states = step_fn(states, actions)
                 next_obs, rewards, dones = states.obs, states.reward, states.done
@@ -390,12 +427,11 @@ def main() -> None:
                     unwrapped_states = unwrap_state_vectorization(states.pipeline_state, config)
                     rollout.extend(unwrapped_states)
 
-                print(dones)
                 if jnp.all(dones):
                     break
 
-            with open("log_" + args.env_name + ".txt", "a") as outfile:
-                outfile.write("\t" + str(episodes) + "\t" + str(jnp.mean(score)) + "\n")
+            # with open("log_" + args.env_name + ".txt", "a") as outfile:
+            #     outfile.write("\t" + str(episodes) + "\t" + str(jnp.mean(score)) + "\n")
             scores.append(jnp.mean(score))
 
         score_avg = float(jnp.mean(jnp.array(scores)))
@@ -408,8 +444,17 @@ def main() -> None:
                 env.render(rollout[:: args.render_every], camera="side", width=args.width, height=args.height)
             )
             fps = int(1 / env.dt)
-            logger.info("Saving video for iteration %d", i)
-            media.write_video(f"videos/{args.env_name}_video{i}.mp4", images, fps=fps)
+
+            script_dir = os.path.dirname(__file__)
+            videos_dir = os.path.join(script_dir, "videos")
+
+            if not os.path.exists(videos_dir):
+                os.makedirs(videos_dir)
+
+            video_path = os.path.join(videos_dir, f"{args.env_name}_video{i}.mp4")
+
+            logger.info("Saving video to %s for iteration %d", video_path, i)
+            media.write_video(video_path, images, fps=fps)
 
         # Convert memory to the format expected by ppo.train
         train_memory = [
