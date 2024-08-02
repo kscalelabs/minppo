@@ -129,7 +129,6 @@ def apply_actor(actor: Critic, state: Array) -> Array:
     return actor(state)
 
 
-@jax.jit
 def train_step(
     actor_optim: optax.GradientTransformation,
     critic_optim: optax.GradientTransformation,
