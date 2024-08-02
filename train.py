@@ -229,7 +229,6 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
         arr = jax.random.permutation(subkey, arr)
         total_actor_loss = 0.0
         total_critic_loss = 0.0
-        print("batches", n // config.batch_size)
         for i in range(n // config.batch_size):
 
             # Batching the data
