@@ -27,10 +27,16 @@ def download_model_files(repo_url: str, repo_dir: str, local_path: str) -> None:
     :param repo_dir: Directory within the repository containing the model files
     :param local_path: Local path where files should be saved
     """
+    target_path = Path(local_path) / repo_dir
+
+    # Check if the target directory already exists
+    if target_path.exists():
+        logger.info(f"Model files are already present in {target_path}. Skipping download.")
+        return
+
     # Create a temporary directory for cloning
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
-        target_path = Path(local_path) / repo_dir
 
         # Clone the repository into the temporary directory
         subprocess.run(["git", "clone", "--depth", "1", repo_url, temp_dir], check=True)

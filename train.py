@@ -266,9 +266,9 @@ def actor_log_prob(mu: Array, sigma: Array, actions: Array) -> Array:
     return jax.scipy.stats.norm.logpdf(actions, mu, sigma).sum(axis=-1)
 
 
-def actor_distribution(mu: Array, sigma: Array) -> Array:
+def actor_distribution(mu: Array, sigma: Array, rng: Array) -> Array:
     """Get an action from the actor network from its probability distribution of actions."""
-    return jax.random.normal(jax.random.PRNGKey(0), shape=mu.shape) * sigma + mu
+    return jax.random.normal(rng, shape=mu.shape) * sigma + mu
 
 
 def unwrap_state_vectorization(state: State, config: Config) -> State:
@@ -315,10 +315,10 @@ def screenshot(
 
 
 @jax.jit
-def choose_action(actor: Actor, obs: Array) -> Array:
+def choose_action(actor: Actor, obs: Array, rng: Array) -> Array:
     # Given a state, we do our forward pass and then sample from to maintain "random actions"
-    mu, sigma = actor(obs)
-    return actor_distribution(mu, sigma)
+    mu, sigma = apply_actor(actor, obs)
+    return actor_distribution(mu, sigma, rng)
 
 
 @jax.jit
@@ -389,14 +389,17 @@ def main() -> None:
         while steps < config.max_steps_per_iteration:
             episodes += config.num_envs
 
-            rng, subrng = jax.random.split(rng)
-            states = reset_fn(subrng)
+            rng, reset_rng = jax.random.split(rng)
+            states = reset_fn(reset_rng)
             obs = jax.device_put(states.obs)
             score = jnp.zeros(config.num_envs)
 
             for _ in range(config.max_steps_per_episode):
-                choose_action_vmap = jax.vmap(choose_action, in_axes=(None, 0))
-                actions = choose_action_vmap(ppo.actor, obs)
+
+                # Choosing actions
+                choose_action_vmap = jax.vmap(choose_action, in_axes=(None, 0, 0))
+                rng, *action_rng = jax.random.split(rng, num=config.num_envs + 1)
+                actions = choose_action_vmap(ppo.actor, obs, jnp.array(action_rng))
 
                 states = step_fn(states, actions)
                 next_obs, rewards, dones = states.obs, states.reward, states.done
