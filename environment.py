@@ -5,8 +5,8 @@ import logging
 import os
 import shutil
 import subprocess
-from pathlib import Path
 import tempfile
+from pathlib import Path
 from typing import Any
 
 import jax
@@ -133,9 +133,9 @@ class HumanoidEnv(PipelineEnv):
 
         ctrl_cost = -jp.sum(jp.square(action))
 
-        xpos = state.subtree_com[1][0]
-        next_xpos = next_state.subtree_com[1][0]
-        velocity = (next_xpos - xpos) / self.dt
+        # xpos = state.subtree_com[1][0]
+        # next_xpos = next_state.subtree_com[1][0]
+        # velocity = (next_xpos - xpos) / self.dt
 
         # jax.debug.print(
         #     "velocity {}, xpos {}, next_xpos {}",
