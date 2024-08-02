@@ -21,11 +21,15 @@ logger = logging.getLogger(__name__)
 
 
 def download_model_files(repo_url: str, repo_dir: str, local_path: str) -> None:
-    """Download or update model files (XML + meshes) from a GitHub repository.
+    """Downloads or updates model files (XML + meshes) from a GitHub repository.
 
-    :param repo_url: URL of the GitHub repository
-    :param repo_dir: Directory within the repository containing the model files
-    :param local_path: Local path where files should be saved
+    Args:
+        repo_url: The URL of the GitHub repository.
+        repo_dir: The directory within the repository containing the model files.
+        local_path: The local path where files should be saved.
+
+    Returns:
+        None
     """
     target_path = Path(local_path) / repo_dir
 
@@ -72,7 +76,7 @@ class HumanoidEnv(PipelineEnv):
 
     initial_qpos: jp.ndarray
     _action_size: int
-    reset_noise_scale: float = 2e-4
+    reset_noise_scale: float = 0
 
     def __init__(self, n_frames: int = 1) -> None:
         """Initializes system with initial joint positions, action size, the model, and update rate."""
@@ -132,10 +136,12 @@ class HumanoidEnv(PipelineEnv):
 
     def compute_reward(self, state: MjxState, next_state: MjxState, action: jp.ndarray) -> jp.ndarray:
         """Compute the reward for standing and height."""
-        min_z, max_z = 0.8, 2.0
+        min_z, max_z = 0.7, 2.0
         # min_z, max_z = -0.35, 2.0
         is_healthy = jp.where(state.q[2] < min_z, 0.0, 1.0)
         is_healthy = jp.where(state.q[2] > max_z, 0.0, is_healthy)
+
+        is_bad = jp.where(state.q[2] < min_z + 0.2, 1.0, 0.0)
 
         ctrl_cost = -jp.sum(jp.square(action))
 
@@ -152,7 +158,7 @@ class HumanoidEnv(PipelineEnv):
         # )
         # jax.debug.print("is_healthy {}, height {}", is_healthy, state.q[2], ordered=True)
 
-        total_reward = 5.0 * state.q[2] + 0.1 * ctrl_cost
+        total_reward = 2.0 * is_healthy + 0.1 * ctrl_cost - 5.0 * is_bad
 
         return total_reward
 
@@ -162,7 +168,7 @@ class HumanoidEnv(PipelineEnv):
         com_height = state.q[2]
 
         # Set a termination threshold
-        termination_height = 0.8
+        termination_height = 0.7
         # termination_height = -0.35
 
         # Episode is done if the robot falls below the termination height
