@@ -37,8 +37,10 @@ def main() -> None:
     args = parser.parse_args()
 
     env = HumanoidEnv()
+    rng = jax.random.PRNGKey(0)
+
     actor_params, _ = load_models(args.actor_path, args.critic_path)
-    actor = Actor(action_size=env.action_size)
+    actor = Actor(input_size=env.observation_size, action_size=env.action_size, key=rng)
 
     reset_fn = jax.jit(env.reset)
     step_fn = jax.jit(env.step)
@@ -48,8 +50,8 @@ def main() -> None:
     rollout: list[Any] = []
 
     for episode in range(args.num_episodes):
-        rng = jax.random.PRNGKey(episode)
-        state = reset_fn(rng)
+        rng, reset_rng = jax.rand.split(rng)
+        state = reset_fn(reset_rng)
         obs = state.obs
 
         total_reward = 0

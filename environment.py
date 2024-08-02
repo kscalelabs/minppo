@@ -3,6 +3,8 @@
 import argparse
 import logging
 import os
+import subprocess
+from pathlib import Path
 from typing import Any
 
 import jax
@@ -14,6 +16,31 @@ from brax.io import mjcf
 from brax.mjx.base import State as MjxState
 
 logger = logging.getLogger(__name__)
+
+
+def download_model_files(repo_url: str, repo_dir: str, local_path: str) -> None:
+    """Download or update model files (XML + meshes) from a GitHub repository.
+
+    :param repo_url: URL of the GitHub repository
+    :param repo_dir: Directory within the repository containing the model files
+    :param local_path: Local path where files should be saved
+    """
+    goal_path = Path(local_path)
+
+    if not (goal_path / repo_dir).exists():
+        print(f"Cloning repository from {repo_url}")
+        subprocess.run(
+            ["git", "clone", "--depth", "1", "--filter=blob:none", "--sparse", repo_url, goal_path], check=True
+        )
+        os.chdir(goal_path)
+        subprocess.run(["git", "sparse-checkout", "set", repo_dir], check=True)
+        print(f"Model files downloaded to {goal_path / repo_dir}")
+    else:
+        print(f"Updating model files in {goal_path / repo_dir}")
+        os.chdir(goal_path)
+        subprocess.run(["git", "pull"], check=True)
+
+    print(f"Model files are up to date at {goal_path / repo_dir}")
 
 
 class HumanoidEnv(PipelineEnv):
@@ -35,12 +62,40 @@ class HumanoidEnv(PipelineEnv):
 
     def __init__(self, n_frames: int = 1) -> None:
         """Initializes system with initial joint positions, action size, the model, and update rate."""
-        # TODO: This model is not available by default.
-        # Instead, we need this class to automatically download the model
-        # (preferrably the Unitree G1 model) and cache it somewhere locally.
-        path: str = os.path.join(os.path.dirname(__file__), "environments", "stompy", "legs.xml")
-        mj_model: mujoco.MjModel = mujoco.MjModel.from_xml_path(path)
+        # GitHub repository URL
+        repo_url = "https://github.com/nathanjzhao/mujoco-models.git"
+
+        # Directory within the repository containing the model files
+        repo_dir = "stompy"
+
+        # Local path where the files should be saved
+        environments_path = os.path.join(os.path.dirname(__file__), "environments")
+
+        # Download or update the model files
+        download_model_files(repo_url, repo_dir, environments_path)
+
+        # Now use the local path to load the model
+        xml_path = os.path.join(environments_path, repo_dir, "legs.xml")
+        mj_model: mujoco.MjModel = mujoco.MjModel.from_xml_path(xml_path)
         self.initial_qpos = jp.array(mj_model.keyframe("default").qpos)
+        #######
+
+        # Default humanoid
+        # from etils import epath
+
+        # path = epath.Path(epath.resource_path("mujoco")) / ("mjx/test_data/humanoid")
+        # mj_model = mujoco.MjModel.from_xml_path((path / "humanoid.xml").as_posix())
+
+        # Stompy
+        # path: str = os.path.join(os.path.dirname(__file__), "environments", "stompy", "legs.xml")
+        # mj_model: mujoco.MjModel = mujoco.MjModel.from_xml_path(path)
+        # self.initial_qpos = jp.array(mj_model.keyframe("default").qpos)
+
+        # mj_data: mujoco.MjData = mujoco.MjData(mj_model)
+        # renderer: mujoco.Renderer = mujoco.Renderer(mj_model)
+
+        ########
+
         self._action_size = mj_model.nu
         sys: base.System = mjcf.load_model(mj_model)
 
@@ -52,8 +107,8 @@ class HumanoidEnv(PipelineEnv):
 
         low, hi = -self.reset_noise_scale, self.reset_noise_scale
 
-        # qpos = self.sys.qpos0 + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
-        qpos = self.initial_qpos + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
+        qpos = self.sys.qpos0 + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
+        # qpos = self.initial_qpos + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
         qvel = jax.random.uniform(rng2, (self.sys.nv,), minval=low, maxval=hi)
 
         # initialize mjx state
@@ -80,7 +135,7 @@ class HumanoidEnv(PipelineEnv):
 
     def compute_reward(self, state: MjxState, next_state: MjxState, action: jp.ndarray) -> jp.ndarray:
         """Compute the reward for standing and height."""
-        min_z, max_z = -1, 2.0
+        min_z, max_z = 0.8, 2.0
         is_healthy = jp.where(state.q[2] < min_z, 0.0, 1.0)
         is_healthy = jp.where(state.q[2] > max_z, 0.0, is_healthy)
 
@@ -90,14 +145,14 @@ class HumanoidEnv(PipelineEnv):
         next_xpos = next_state.subtree_com[1][0]
         velocity = (next_xpos - xpos) / self.dt
 
-        jax.debug.print(
-            "velocity {}, xpos {}, next_xpos {}",
-            velocity,
-            xpos,
-            next_xpos,
-            ordered=True,
-        )
-        jax.debug.print("is_healthy {}, height {}", is_healthy, state.q[2], ordered=True)
+        # jax.debug.print(
+        #     "velocity {}, xpos {}, next_xpos {}",
+        #     velocity,
+        #     xpos,
+        #     next_xpos,
+        #     ordered=True,
+        # )
+        # jax.debug.print("is_healthy {}, height {}", is_healthy, state.q[2], ordered=True)
 
         total_reward = 5.0 * is_healthy + 1.25 * velocity + 0.1 * ctrl_cost
 
@@ -109,7 +164,7 @@ class HumanoidEnv(PipelineEnv):
         com_height = state.q[2]
 
         # Set a termination threshold
-        termination_height = -1
+        termination_height = 0.8
 
         # Episode is done if the robot falls below the termination height
         done = jp.where(com_height < termination_height, 1.0, 0.0)
