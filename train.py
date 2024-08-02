@@ -27,10 +27,10 @@ class Config:
     lr_actor: float = field(default=3e-4, metadata={"help": "Learning rate for the actor network."})
     lr_critic: float = field(default=3e-4, metadata={"help": "Learning rate for the critic network."})
     num_iterations: int = field(default=15000, metadata={"help": "Number of environment simulation iterations."})
-    num_envs: int = field(default=2048, metadata={"help": "Number of environments to run at once with vectorization."})
-    max_steps_per_episode: int = field(default=2048 * 1000, metadata={"help": "Maximum number of steps per episode."})
+    num_envs: int = field(default=4, metadata={"help": "Number of environments to run at once with vectorization."})
+    max_steps_per_episode: int = field(default=2048, metadata={"help": "Maximum number of steps per episode."})
     max_steps_per_iteration: int = field(
-        default=262144,
+        default=16384,
         metadata={"help": "Maximum number of steps per iteration of simulating environments (across all episodes)."},
     )
     gamma: float = field(default=0.98, metadata={"help": "Discount factor for future rewards."})
@@ -55,9 +55,6 @@ class Actor(eqx.Module):
         self.mu_layer = eqx.nn.Linear(64, action_size, key=keys[2])
         self.log_sigma_layer = eqx.nn.Linear(64, action_size, key=keys[3])
 
-        # Initialize mu_layer weights to small values
-        self.mu_layer = eqx.tree_at(lambda layer: layer.weight, self.mu_layer, 0.1 * self.mu_layer.weight)
-
     def __call__(self, x: Array) -> Tuple[Array, Array]:
         x = jax.nn.tanh(self.linear1(x))
         x = jax.nn.tanh(self.linear2(x))
@@ -78,9 +75,6 @@ class Critic(eqx.Module):
         self.linear1 = eqx.nn.Linear(input_size, 64, key=keys[0])
         self.linear2 = eqx.nn.Linear(64, 64, key=keys[1])
         self.value_layer = eqx.nn.Linear(64, 1, key=keys[2])
-
-        # Initialize value_layer weights to small values
-        self.value_layer = eqx.tree_at(lambda layer: layer.weight, self.value_layer, 0.1 * self.value_layer.weight)
 
     def __call__(self, x: Array) -> Array:
         x = jax.nn.tanh(self.linear1(x))
@@ -235,6 +229,7 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
         arr = jax.random.permutation(subkey, arr)
         total_actor_loss = 0.0
         total_critic_loss = 0.0
+        print("batches", n // config.batch_size)
         for i in range(n // config.batch_size):
 
             # Batching the data
@@ -428,8 +423,8 @@ def main() -> None:
                 if jnp.all(dones):
                     break
 
-            with open("log_" + args.env_name + ".txt", "a") as outfile:
-                outfile.write("\t" + str(episodes) + "\t" + str(jnp.mean(score)) + "\n")
+            # with open("log_" + args.env_name + ".txt", "a") as outfile:
+            #     outfile.write("\t" + str(episodes) + "\t" + str(jnp.mean(score)) + "\n")
             scores.append(jnp.mean(score))
 
         score_avg = float(jnp.mean(jnp.array(scores)))
