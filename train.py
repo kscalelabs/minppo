@@ -1,6 +1,8 @@
 """Trains a policy network to get a humanoid to stand up."""
 
 import argparse
+from functools import partial
+import wandb
 import logging
 import os
 from dataclasses import dataclass, field
@@ -27,12 +29,12 @@ class Config:
     lr_actor: float = field(default=2.5e-4, metadata={"help": "Learning rate for the actor network."})
     lr_critic: float = field(default=2.5e-4, metadata={"help": "Learning rate for the critic network."})
     num_iterations: int = field(default=15000, metadata={"help": "Number of environment simulation iterations."})
-    num_envs: int = field(default=16, metadata={"help": "Number of environments to run at once with vectorization."})
+    num_envs: int = field(default=2048, metadata={"help": "Number of environments to run at once with vectorization."})
     max_steps_per_episode: int = field(
-        default=128 * 16, metadata={"help": "Maximum number of steps per episode (across ALL environments)."}
+        default=128 * 2048, metadata={"help": "Maximum number of steps per episode (across ALL environments)."}
     )
     max_steps_per_iteration: int = field(
-        default=512 * 16,
+        default=512 * 2048,
         metadata={
             "help": "Maximum number of steps per iteration of simulating environments (across ALL environments)."
         },
@@ -209,7 +211,7 @@ def train_step(
     # Normalizing advantages *in minibatch* according to Trick #7
     advants_b = (advants_b - advants_b.mean()) / (advants_b.std() + 1e-8)
 
-    @eqx.filter_value_and_grad
+    @partial(eqx.filter_value_and_grad, has_aux=True)
     def actor_loss_fn(actor: Actor) -> Array:
         """Prioritizing advantageous actions over more training."""
         mu_b, std_b = actor_vmap(actor, states_b)
@@ -224,9 +226,11 @@ def train_step(
 
         actor_loss = -jnp.mean(jnp.minimum(surrogate_loss_b, clipped_loss_b))
         entropy_loss = jnp.mean(0.5 * (jnp.log(2 * jnp.pi * std_b**2) + 1))
-        
+
+        fraction_clipped = jnp.mean(jnp.abs(ratio_b - 1.0) > config.epsilon)
+
         total_loss = actor_loss - config.entropy_coeff * entropy_loss
-        return total_loss
+        return total_loss, (actor_loss, entropy_loss, fraction_clipped)
 
     @eqx.filter_value_and_grad
     def critic_loss_fn(critic: Critic) -> Array:
@@ -236,7 +240,7 @@ def train_step(
         return critic_loss
 
     # Calculating actor loss and updating actor parameters
-    actor_loss, actor_grads = actor_loss_fn(actor)
+    (_, actor_loss, entropy_loss, fraction_clipped), actor_grads = actor_loss_fn(actor)
     actor_updates, new_actor_opt_state = actor_optim.update(actor_grads, actor_opt_state, params=actor)
     new_actor = eqx.apply_updates(actor, actor_updates)
 
@@ -252,7 +256,7 @@ def train_step(
         "critic_opt_state": new_critic_opt_state,
     }
 
-    return new_params, actor_loss, critic_loss
+    return new_params, (actor_loss, critic_loss, entropy_loss, fraction_clipped)
 
 
 def get_gae(rewards: Array, masks: Array, values: Array, config: Config) -> Tuple[Array, Array]:
@@ -307,8 +311,15 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
     for epoch in range(1):
         key, subkey = jax.random.split(key)
         arr = jax.random.permutation(subkey, arr)
+
+        # Calculate average advantages and returns
+        avg_advantages = jnp.mean(advantages)
+        avg_returns = jnp.mean(returns)
         total_actor_loss = 0.0
         total_critic_loss = 0.0
+        total_entropy_loss = 0.0
+        total_fraction_clipped = 0.0
+
         logger.info("Processing %d batches", n // config.batch_size)
         for i in range(n // config.batch_size):
 
@@ -321,7 +332,7 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
             old_log_prob_b = old_log_prob[batch_indices]
 
             params = ppo.get_params()
-            new_params, actor_loss, critic_loss = train_step(
+            new_params, (actor_loss, critic_loss, entropy_loss, fraction_clipped) = train_step(
                 ppo.actor_optim,
                 ppo.critic_optim,
                 params,
@@ -336,11 +347,27 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
 
             total_actor_loss += actor_loss.mean().item()
             total_critic_loss += critic_loss.mean().item()
+            total_entropy_loss += entropy_loss.item()
+            total_fraction_clipped += fraction_clipped.item()
 
         mean_actor_loss = total_actor_loss / (n // config.batch_size)
         mean_critic_loss = total_critic_loss / (n // config.batch_size)
+        mean_entropy_loss = total_entropy_loss / (n // config.batch_size)
+        mean_fraction_clipped = total_fraction_clipped / (n // config.batch_size)
 
         logger.info(f"Mean Actor Loss: {mean_actor_loss}, Mean Critic Loss: {mean_critic_loss}")
+
+        # Log metrics to wandb
+        wandb.log(
+            {
+                "actor_loss": mean_actor_loss,
+                "critic_loss": mean_critic_loss,
+                "entropy_loss": mean_entropy_loss,
+                "fraction_clipped": mean_fraction_clipped,
+                "avg_advantages": avg_advantages,
+                "avg_returns": avg_returns,
+            }
+        )
 
 
 def actor_log_prob(mu: Array, sigma: Array, actions: Array) -> Array:
@@ -525,8 +552,6 @@ def main() -> None:
             #     outfile.write("\t" + str(episodes) + "\t" + str(jnp.mean(score)) + "\n")
             scores.append(jnp.mean(score))
 
-            # Convert memory to the format expected by ppo.train
-
             memory = reorder_memory(memory, config.num_envs)
 
             train_memory = [
@@ -538,6 +563,8 @@ def main() -> None:
         score_avg = float(jnp.mean(jnp.array(scores)))
         pbar.close()
         logger.info("Episode %s score is %.2f", episodes, score_avg)
+        
+        wandb.log({"score": score_avg, "episode": episodes})
 
         # Save video for this iteration
         if args.save_video_every and i % args.save_video_every == 0 and rollout:
@@ -560,3 +587,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    wandb.init(project="humanoid-ppo", config=vars(config))
