@@ -56,10 +56,10 @@ class Actor(eqx.Module):
 
     def __init__(self, input_size: int, action_size: int, key: Array) -> None:
         keys = jax.random.split(key, 4)
-        self.linear1 = eqx.nn.Linear(input_size, 64, key=keys[0])
-        self.linear2 = eqx.nn.Linear(64, 64, key=keys[1])
-        self.mu_layer = eqx.nn.Linear(64, action_size, key=keys[2])
-        self.log_sigma_layer = eqx.nn.Linear(64, action_size, key=keys[3])
+        self.linear1 = eqx.nn.Linear(input_size, 256, key=keys[0])
+        self.linear2 = eqx.nn.Linear(256, 256, key=keys[1])
+        self.mu_layer = eqx.nn.Linear(256, action_size, key=keys[2])
+        self.log_sigma_layer = eqx.nn.Linear(256, action_size, key=keys[3])
 
         # Parameter initialization according to Trick #2
         self.linear1 = self.initialize_layer(self.linear1, np.sqrt(2), keys[0])
@@ -79,7 +79,7 @@ class Actor(eqx.Module):
 
         initializer = jax.nn.initializers.orthogonal()
         new_weight = initializer(key, weight_shape, jnp.float32) * scale
-        new_bias = jnp.zeros(layer.bias.shape) if layer.bias else None
+        new_bias = jnp.zeros(layer.bias.shape) if layer.bias is not None else None
 
         def where_weight(layer: eqx.nn.Linear) -> Array:
             return layer.weight
@@ -102,9 +102,9 @@ class Critic(eqx.Module):
 
     def __init__(self, input_size: int, key: Array) -> None:
         keys = jax.random.split(key, 3)
-        self.linear1 = eqx.nn.Linear(input_size, 64, key=keys[0])
-        self.linear2 = eqx.nn.Linear(64, 64, key=keys[1])
-        self.value_layer = eqx.nn.Linear(64, 1, key=keys[2])
+        self.linear1 = eqx.nn.Linear(input_size, 256, key=keys[0])
+        self.linear2 = eqx.nn.Linear(256, 256, key=keys[1])
+        self.value_layer = eqx.nn.Linear(256, 1, key=keys[2])
 
         # Parameter initialization according to Trick #2
         self.linear1 = self.initialize_layer(self.linear1, np.sqrt(2), keys[0])
@@ -121,7 +121,7 @@ class Critic(eqx.Module):
 
         initializer = jax.nn.initializers.orthogonal()
         new_weight = initializer(key, weight_shape, jnp.float32) * scale
-        new_bias = jnp.zeros(layer.bias.shape) if layer.bias else None
+        new_bias = jnp.zeros(layer.bias.shape) if layer.bias is not None else None
 
         def where_weight(layer: eqx.nn.Linear) -> Array:
             return layer.weight
@@ -217,14 +217,14 @@ def train_step(
 
         # Calculating the ratio of new and old probabilities
         ratio_b = jnp.exp(new_log_prob_b - old_log_prob_b)
-        breakpoint()
         surrogate_loss_b = ratio_b * advants_b
 
         # Clipping is done to prevent too much change if new advantages are very large
         clipped_loss_b = jnp.clip(ratio_b, 1.0 - config.epsilon, 1.0 + config.epsilon) * advants_b
-        actor_loss = -jnp.mean(jnp.minimum(surrogate_loss_b, clipped_loss_b))
 
-        entropy_loss = jnp.mean(jax.scipy.stats.norm.entropy(mu_b, std_b))
+        actor_loss = -jnp.mean(jnp.minimum(surrogate_loss_b, clipped_loss_b))
+        entropy_loss = jnp.mean(0.5 * (jnp.log(2 * jnp.pi * std_b**2) + 1))
+        
         total_loss = actor_loss - config.entropy_coeff * entropy_loss
         return total_loss
 
@@ -279,8 +279,6 @@ def get_gae(rewards: Array, masks: Array, values: Array, config: Config) -> Tupl
 
 def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Config) -> None:
     """Train the PPO model using the memory collected from the environment."""
-    # NOTE: think this needs to be reimplemented for vectorization because currently,
-    # doesn't account that memory order is maintained
 
     # Reorders memory according to states, actions, rewards, masks
     states = jnp.array([e[0] for e in memory])
@@ -296,6 +294,8 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
     # Calculate values for all states
     critic_vmap = jax.vmap(apply_critic, in_axes=(None, 0))
     values = critic_vmap(ppo.critic, states).squeeze()
+
+    # NOTE: are the output shapes correct?
 
     # Calculate GAE and returns
     returns, advantages = get_gae(rewards, masks, values, config)
@@ -408,6 +408,16 @@ def update_memory(memory: Dict[str, Array], new_data: Dict[str, Array]) -> Dict[
     return jax.tree.map(lambda x, y: jnp.concatenate([x, y]), memory, new_data)
 
 
+def reorder_memory(memory, num_envs):
+    reordered_memory = {
+        "states": jnp.concatenate([memory["states"][i::num_envs] for i in range(num_envs)], axis=0),
+        "actions": jnp.concatenate([memory["actions"][i::num_envs] for i in range(num_envs)], axis=0),
+        "rewards": jnp.concatenate([memory["rewards"][i::num_envs] for i in range(num_envs)], axis=0),
+        "masks": jnp.concatenate([memory["masks"][i::num_envs] for i in range(num_envs)], axis=0),
+    }
+    return reordered_memory
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -516,6 +526,9 @@ def main() -> None:
             scores.append(jnp.mean(score))
 
             # Convert memory to the format expected by ppo.train
+
+            memory = reorder_memory(memory, config.num_envs)
+
             train_memory = [
                 (s, a, r, m)
                 for s, a, r, m in zip(memory["states"], memory["actions"], memory["rewards"], memory["masks"])
