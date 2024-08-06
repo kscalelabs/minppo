@@ -1,11 +1,10 @@
 """Trains a policy network to get a humanoid to stand up."""
 
 import argparse
-from functools import partial
-import wandb
 import logging
 import os
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Dict, List, Tuple
 
 import equinox as eqx
@@ -19,6 +18,7 @@ from brax.mjx.base import State as MjxState
 from jax import Array
 from tqdm import tqdm
 
+import wandb
 from environment import HumanoidEnv
 
 logger = logging.getLogger(__name__)
@@ -29,12 +29,12 @@ class Config:
     lr_actor: float = field(default=2.5e-4, metadata={"help": "Learning rate for the actor network."})
     lr_critic: float = field(default=2.5e-4, metadata={"help": "Learning rate for the critic network."})
     num_iterations: int = field(default=15000, metadata={"help": "Number of environment simulation iterations."})
-    num_envs: int = field(default=2048, metadata={"help": "Number of environments to run at once with vectorization."})
+    num_envs: int = field(default=32, metadata={"help": "Number of environments to run at once with vectorization."})
     max_steps_per_episode: int = field(
-        default=128 * 2048, metadata={"help": "Maximum number of steps per episode (across ALL environments)."}
+        default=128 * 32, metadata={"help": "Maximum number of steps per episode (across ALL environments)."}
     )
     max_steps_per_iteration: int = field(
-        default=512 * 2048,
+        default=512 * 32,
         metadata={
             "help": "Maximum number of steps per iteration of simulating environments (across ALL environments)."
         },
@@ -47,7 +47,6 @@ class Config:
     entropy_coeff: float = field(default=0.01, metadata={"help": "Coefficient for entropy loss."})
 
 
-# NOTE: change how initialize weights?
 class Actor(eqx.Module):
     """Actor network for PPO."""
 
@@ -148,10 +147,10 @@ class Ppo:
 
         # Learning rate annealing according to Trick #4
         self.actor_schedule = optax.linear_schedule(
-            init_value=config.lr_actor, end_value=0, transition_steps=total_timesteps
+            init_value=config.lr_actor, end_value=1e-6, transition_steps=total_timesteps
         )
         self.critic_schedule = optax.linear_schedule(
-            init_value=config.lr_critic, end_value=0, transition_steps=total_timesteps
+            init_value=config.lr_critic, end_value=1e-6, transition_steps=total_timesteps
         )
 
         # eps below according to Trick #3
@@ -239,8 +238,8 @@ def train_step(
         critic_loss = jnp.mean((critic_returns_b - returns_b) ** 2)
         return critic_loss
 
-    # Calculating actor loss and updating actor parameters
-    (_, actor_loss, entropy_loss, fraction_clipped), actor_grads = actor_loss_fn(actor)
+    # Calculating actor loss and updating actor parameters --- outputting auxillary data for logging
+    (_, (actor_loss, entropy_loss, fraction_clipped)), actor_grads = actor_loss_fn(actor)
     actor_updates, new_actor_opt_state = actor_optim.update(actor_grads, actor_opt_state, params=actor)
     new_actor = eqx.apply_updates(actor, actor_updates)
 
@@ -283,7 +282,6 @@ def get_gae(rewards: Array, masks: Array, values: Array, config: Config) -> Tupl
 
 def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Config) -> None:
     """Train the PPO model using the memory collected from the environment."""
-
     # Reorders memory according to states, actions, rewards, masks
     states = jnp.array([e[0] for e in memory])
     actions = jnp.array([e[1] for e in memory])
@@ -372,7 +370,7 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
 
 def actor_log_prob(mu: Array, sigma: Array, actions: Array) -> Array:
     """Calculate the log probability of the actions given the actor network's output."""
-    return jax.scipy.stats.norm.logpdf(actions, mu, sigma).sum(axis=-1)
+    return jax.scipy.stats.norm.logpdf(actions, mu, sigma + 1e-8).sum(axis=-1)
 
 
 def actor_distribution(mu: Array, sigma: Array, rng: Array) -> Array:
@@ -380,7 +378,7 @@ def actor_distribution(mu: Array, sigma: Array, rng: Array) -> Array:
     return jax.random.normal(rng, shape=mu.shape) * sigma + mu
 
 
-def unwrap_state_vectorization(state: State, config: Config) -> State:
+def unwrap_state_vectorization(state: State, envs_to_sample: int) -> State:
     """Unwraps one environment the vectorized rollout so that the frames in videos are correctly ordered."""
     unwrapped_rollout = []
     # Get all attributes of the state
@@ -389,7 +387,7 @@ def unwrap_state_vectorization(state: State, config: Config) -> State:
     # NOTE: can change ordering of this to save runtiem if want to save more vectorized states.
     # NOTE: (but anyways, the video isn't correctly ordered then)
     # saves from only first vectorized state
-    for i in range(1):
+    for i in range(envs_to_sample):
         # Create a new state with the first element of each attribute
         new_state = {}
         for attr in attributes:
@@ -435,7 +433,7 @@ def update_memory(memory: Dict[str, Array], new_data: Dict[str, Array]) -> Dict[
     return jax.tree.map(lambda x, y: jnp.concatenate([x, y]), memory, new_data)
 
 
-def reorder_memory(memory, num_envs):
+def reorder_memory(memory: Dict[str, Array], num_envs: int) -> Dict[str, Array]:
     reordered_memory = {
         "states": jnp.concatenate([memory["states"][i::num_envs] for i in range(num_envs)], axis=0),
         "actions": jnp.concatenate([memory["actions"][i::num_envs] for i in range(num_envs)], axis=0),
@@ -458,11 +456,13 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=640, help="width of the video frame")
     parser.add_argument("--height", type=int, default=480, help="height of the video frame")
     parser.add_argument("--render_every", type=int, default=2, help="render the environment every N steps")
-    parser.add_argument("--video_length", type=int, default=5, help="maxmimum length of video in seconds")
+    parser.add_argument("--video_length", type=int, default=10, help="maxmimum length of video in seconds")
     parser.add_argument("--save_video_every", type=int, default=100, help="save video every N iterations")
+    parser.add_argument("--envs_to_sample", type=int, default=4, help="number of environments to sample for video")
     args = parser.parse_args()
 
     config = Config()
+    wandb.init(project="humanoid-ppo", config=vars(config))
 
     env = HumanoidEnv()
     observation_size = env.observation_size
@@ -500,11 +500,13 @@ def main() -> None:
         rng, reset_rng = jax.random.split(rng)
         states = reset_fn(reset_rng)
         pbar = tqdm(total=config.max_steps_per_iteration, desc=f"Steps for iteration {i}")
+        wait = -1
 
         while steps < config.max_steps_per_iteration:
             episodes += config.num_envs
 
-            obs = jax.device_put(states.obs)
+            norm_obs = (states.obs - jnp.mean(states.obs, axis=1, keepdims=True)) / (jnp.std(states.obs, axis=1, keepdims=True) + 1e-8)
+            obs = jax.device_put(norm_obs)
             score = jnp.zeros(config.num_envs)
 
             memory = {
@@ -522,8 +524,9 @@ def main() -> None:
                 actions = choose_action_vmap(ppo.actor, obs, jnp.array(action_rng))
 
                 states = step_fn(states, actions)
-                next_obs, rewards, dones = states.obs, states.reward, states.done
-                masks = (1 - dones).astype(jnp.float32)
+                norm_obs = (states.obs - jnp.mean(states.obs, axis=1, keepdims=True)) / (jnp.std(states.obs, axis=1, keepdims=True) + 1e-8)
+                next_obs, rewards, dones = norm_obs, states.reward, states.done
+                masks = (1 - 0.8 * dones).astype(jnp.float32)
 
                 # Update memory
                 new_data = {"states": obs, "actions": actions, "rewards": rewards, "masks": masks}
@@ -540,13 +543,21 @@ def main() -> None:
                     and i % args.save_video_every == 0
                     and len(rollout) < args.video_length * int(1 / env.dt)
                 ):
-                    unwrapped_states = unwrap_state_vectorization(states.pipeline_state, config)
+                    unwrapped_states = unwrap_state_vectorization(states.pipeline_state, args.envs_to_sample)
                     rollout.extend(unwrapped_states)
 
                 if jnp.all(dones):
-                    rng, reset_rng = jax.random.split(rng)
-                    states = reset_fn(reset_rng)
-                    break
+
+                    # NOTE: this "waiting" penalizes systems that just want to fall quick (and reset quick)
+                    # goes from needing 84 steps to 30 steps
+                    if wait == -1:
+                        wait = 10
+                    else:
+                        wait -= 1
+                        if wait == 0:
+                            rng, reset_rng = jax.random.split(rng)
+                            states = reset_fn(reset_rng)
+                            break
 
             # with open("log_" + args.env_name + ".txt", "a") as outfile:
             #     outfile.write("\t" + str(episodes) + "\t" + str(jnp.mean(score)) + "\n")
@@ -563,13 +574,18 @@ def main() -> None:
         score_avg = float(jnp.mean(jnp.array(scores)))
         pbar.close()
         logger.info("Episode %s score is %.2f", episodes, score_avg)
-        
+
         wandb.log({"score": score_avg, "episode": episodes})
 
         # Save video for this iteration
         if args.save_video_every and i % args.save_video_every == 0 and rollout:
+
+            reordered_rollout = [
+                frame for i in range(args.envs_to_sample) for frame in rollout[i :: args.envs_to_sample]
+            ]
+
             images = jnp.array(
-                env.render(rollout[:: args.render_every], camera="side", width=args.width, height=args.height)
+                env.render(reordered_rollout[:: args.render_every], camera="side", width=args.width, height=args.height)
             )
             fps = int(1 / env.dt)
 
@@ -587,4 +603,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    wandb.init(project="humanoid-ppo", config=vars(config))
