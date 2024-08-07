@@ -125,6 +125,7 @@ class HumanoidEnv(PipelineEnv):
         """Run one timestep of the environment's dynamics and returns observations with rewards."""
         state = env_state.pipeline_state
         next_state = self.pipeline_step(state, action)
+
         obs = self.get_obs(state, action)
 
         reward = self.compute_reward(state, next_state, action)
@@ -141,7 +142,7 @@ class HumanoidEnv(PipelineEnv):
         is_healthy = jp.where(state.q[2] < min_z, 0.0, 1.0)
         is_healthy = jp.where(state.q[2] > max_z, 0.0, is_healthy)
 
-        is_bad = jp.where(state.q[2] < min_z + 0.2, 1.0, 0.0)
+        # is_bad = jp.where(state.q[2] < min_z + 0.2, 1.0, 0.0)
 
         ctrl_cost = -jp.sum(jp.square(action))
 
@@ -158,7 +159,7 @@ class HumanoidEnv(PipelineEnv):
         # )
         # jax.debug.print("is_healthy {}, height {}", is_healthy, state.q[2], ordered=True)
 
-        total_reward = 2.0 * is_healthy + 0.1 * ctrl_cost - 5.0 * is_bad
+        total_reward = jp.clip(0.1 * ctrl_cost + 5 * is_healthy, -1e8, 10.0)
 
         return total_reward
 
@@ -177,20 +178,25 @@ class HumanoidEnv(PipelineEnv):
         return done
 
     def get_obs(self, data: MjxState, action: jp.ndarray) -> jp.ndarray:
-        """Returns the observation of the environment to pass to actor/critic model."""
-        position = data.qpos
-        position = position[2:]  # excludes "current positions"
+        obs_components = [
+            data.qpos[2:],
+            data.qvel,
+            data.cinert[1:].ravel(),
+            data.cvel[1:].ravel(),
+            data.qfrc_actuator,
+        ]
 
-        # external_contact_forces are excluded
-        return jp.concatenate(
-            [
-                position,
-                data.qvel,
-                data.cinert[1:].ravel(),
-                data.cvel[1:].ravel(),
-                data.qfrc_actuator,
-            ]
-        )
+        def clean_component(component: jp.ndarray) -> jp.ndarray:
+            # Check for NaNs or Infs and replace them
+            nan_mask = jp.isnan(component)
+            inf_mask = jp.isinf(component)
+            component = jp.where(nan_mask, 0.0, component)
+            component = jp.where(inf_mask, jp.where(component > 0, 1e6, -1e6), component)
+            return component
+
+        cleaned_components = [clean_component(comp) for comp in obs_components]
+
+        return jp.concatenate(cleaned_components)
 
 
 def run_environment_adhoc() -> None:
