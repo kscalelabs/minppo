@@ -159,7 +159,7 @@ class HumanoidEnv(PipelineEnv):
         # )
         # jax.debug.print("is_healthy {}, height {}", is_healthy, state.q[2], ordered=True)
 
-        total_reward = 0.1 * ctrl_cost + 5 * is_healthy + 3 * state.q[2]
+        total_reward = jp.clip(0.1 * ctrl_cost + 5 * is_healthy, -1e8, 10.0)
 
         return total_reward
 
@@ -186,7 +186,7 @@ class HumanoidEnv(PipelineEnv):
             data.qfrc_actuator,
         ]
 
-        def clean_component(component):
+        def clean_component(component: jp.ndarray) -> jp.ndarray:
             # Check for NaNs or Infs and replace them
             nan_mask = jp.isnan(component)
             inf_mask = jp.isinf(component)

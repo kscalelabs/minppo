@@ -4,7 +4,6 @@ import argparse
 import logging
 import os
 from dataclasses import dataclass, field
-from functools import partial
 from typing import Any, Dict, List, Tuple
 
 import equinox as eqx
@@ -200,7 +199,7 @@ def train_step(
     advants_b: Array,
     old_log_prob_b: Array,
     config: Config,
-) -> Tuple[Dict[str, Any], Array, Array]:
+) -> Tuple[Dict[str, Any], Tuple[Array, Array]]:
     """Perform a single training step with PPO parameters."""
     actor, critic, actor_opt_state, critic_opt_state = params.values()
 
@@ -210,7 +209,7 @@ def train_step(
     # Normalizing advantages *in minibatch* according to Trick #7
     advants_b = (advants_b - advants_b.mean()) / (advants_b.std() + 1e-8)
 
-    @partial(eqx.filter_value_and_grad, has_aux=True)
+    @eqx.filter_value_and_grad
     def actor_loss_fn(actor: Actor) -> Array:
         """Prioritizing advantageous actions over more training."""
         mu_b, std_b = actor_vmap(actor, states_b)
@@ -226,10 +225,8 @@ def train_step(
         actor_loss = -jnp.mean(jnp.minimum(surrogate_loss_b, clipped_loss_b))
         entropy_loss = jnp.mean(0.5 * (jnp.log(2 * jnp.pi * std_b**2) + 1))
 
-        fraction_clipped = jnp.mean(jnp.abs(ratio_b - 1.0) > config.epsilon)
-
         total_loss = actor_loss - config.entropy_coeff * entropy_loss
-        return total_loss, (actor_loss, entropy_loss, fraction_clipped)
+        return total_loss
 
     @eqx.filter_value_and_grad
     def critic_loss_fn(critic: Critic) -> Array:
@@ -239,7 +236,7 @@ def train_step(
         return critic_loss
 
     # Calculating actor loss and updating actor parameters --- outputting auxillary data for logging
-    (_, (actor_loss, entropy_loss, fraction_clipped)), actor_grads = actor_loss_fn(actor)
+    actor_loss, actor_grads = actor_loss_fn(actor)
     actor_updates, new_actor_opt_state = actor_optim.update(actor_grads, actor_opt_state, params=actor)
     new_actor = eqx.apply_updates(actor, actor_updates)
 
@@ -255,7 +252,7 @@ def train_step(
         "critic_opt_state": new_critic_opt_state,
     }
 
-    return new_params, (actor_loss, critic_loss, entropy_loss, fraction_clipped)
+    return new_params, (actor_loss, critic_loss)
 
 
 def get_gae(rewards: Array, masks: Array, values: Array, config: Config) -> Tuple[Array, Array]:
@@ -315,8 +312,6 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
         avg_returns = jnp.mean(returns)
         total_actor_loss = 0.0
         total_critic_loss = 0.0
-        total_entropy_loss = 0.0
-        total_fraction_clipped = 0.0
 
         logger.info("Processing %d batches", n // config.batch_size)
         for i in range(n // config.batch_size):
@@ -330,7 +325,7 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
             old_log_prob_b = old_log_prob[batch_indices]
 
             params = ppo.get_params()
-            new_params, (actor_loss, critic_loss, entropy_loss, fraction_clipped) = train_step(
+            new_params, (actor_loss, critic_loss) = train_step(
                 ppo.actor_optim,
                 ppo.critic_optim,
                 params,
@@ -345,13 +340,9 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
 
             total_actor_loss += actor_loss.mean().item()
             total_critic_loss += critic_loss.mean().item()
-            total_entropy_loss += entropy_loss.item()
-            total_fraction_clipped += fraction_clipped.item()
 
         mean_actor_loss = total_actor_loss / (n // config.batch_size)
         mean_critic_loss = total_critic_loss / (n // config.batch_size)
-        mean_entropy_loss = total_entropy_loss / (n // config.batch_size)
-        mean_fraction_clipped = total_fraction_clipped / (n // config.batch_size)
 
         logger.info(f"Mean Actor Loss: {mean_actor_loss}, Mean Critic Loss: {mean_critic_loss}")
 
@@ -360,8 +351,6 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
             {
                 "actor_loss": mean_actor_loss,
                 "critic_loss": mean_critic_loss,
-                "entropy_loss": mean_entropy_loss,
-                "fraction_clipped": mean_fraction_clipped,
                 "avg_advantages": avg_advantages,
                 "avg_returns": avg_returns,
             }
@@ -384,9 +373,6 @@ def unwrap_state_vectorization(state: State, envs_to_sample: int) -> State:
     # Get all attributes of the state
     attributes = dir(state)
 
-    # NOTE: can change ordering of this to save runtiem if want to save more vectorized states.
-    # NOTE: (but anyways, the video isn't correctly ordered then)
-    # saves from only first vectorized state
     for i in range(envs_to_sample):
         # Create a new state with the first element of each attribute
         new_state = {}
@@ -502,10 +488,13 @@ def main() -> None:
         pbar = tqdm(total=config.max_steps_per_iteration, desc=f"Steps for iteration {i}")
         wait = -1
 
-        while steps < config.max_steps_per_iteration:
+        while steps < config.max_steps_per_iteration // config.num_envs:
             episodes += config.num_envs
 
-            norm_obs = (states.obs - jnp.mean(states.obs, axis=1, keepdims=True)) / (jnp.std(states.obs, axis=1, keepdims=True) + 1e-8)
+            # Normalizing observations quickens learning
+            norm_obs = (states.obs - jnp.mean(states.obs, axis=1, keepdims=True)) / (
+                jnp.std(states.obs, axis=1, keepdims=True) + 1e-8
+            )
             obs = jax.device_put(norm_obs)
             score = jnp.zeros(config.num_envs)
 
@@ -516,23 +505,32 @@ def main() -> None:
                 "masks": jnp.empty((0,)),
             }
 
-            for _ in range(config.max_steps_per_episode):
+            for _ in range(config.max_steps_per_episode // config.num_envs):
 
                 # Choosing actions
                 choose_action_vmap = jax.vmap(choose_action, in_axes=(None, 0, 0))
                 rng, *action_rng = jax.random.split(rng, num=config.num_envs + 1)
                 actions = choose_action_vmap(ppo.actor, obs, jnp.array(action_rng))
 
+                # NOTE: disable actions when "done" --> better for current wait system?
                 states = step_fn(states, actions)
-                norm_obs = (states.obs - jnp.mean(states.obs, axis=1, keepdims=True)) / (jnp.std(states.obs, axis=1, keepdims=True) + 1e-8)
+
+                # Normalizing observations quickens learning
+                norm_obs = (states.obs - jnp.mean(states.obs, axis=1, keepdims=True)) / (
+                    jnp.std(states.obs, axis=1, keepdims=True) + 1e-8
+                )
                 next_obs, rewards, dones = norm_obs, states.reward, states.done
-                masks = (1 - 0.8 * dones).astype(jnp.float32)
+                masks = (1 - dones).astype(jnp.float32)
 
                 # Update memory
                 new_data = {"states": obs, "actions": actions, "rewards": rewards, "masks": masks}
                 memory = update_memory(memory, new_data)
 
                 score += rewards
+
+                if jnp.any(jnp.isnan(rewards)):
+                    print(rewards)
+
                 obs = next_obs
                 steps += config.num_envs
                 pbar.update(config.num_envs)
@@ -548,8 +546,9 @@ def main() -> None:
 
                 if jnp.all(dones):
 
-                    # NOTE: this "waiting" penalizes systems that just want to fall quick (and reset quick)
-                    # goes from needing 84 steps to 30 steps
+                    # NOTE: this "waiting" penalizes systems that just want to fall quick (and reset quick),
+                    # since prevents fast reset goes from needing 84 steps to 30 steps to get to pretty high scores.
+                    # This isn't implemented in any other PPO though so not sure if it's a good idea.
                     if wait == -1:
                         wait = 10
                     else:
