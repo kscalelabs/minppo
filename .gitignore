@@ -18,10 +18,9 @@ dist/
 out*/
 *.stl
 *.txt
+*.mp4
 
-videos/
 environments/
 screenshots/
 scratch/
-videos/
 assets/

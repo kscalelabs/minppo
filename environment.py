@@ -141,7 +141,7 @@ class HumanoidEnv(PipelineEnv):
         is_healthy = jp.where(state.q[2] < min_z, 0.0, 1.0)
         is_healthy = jp.where(state.q[2] > max_z, 0.0, is_healthy)
 
-        is_bad = jp.where(state.q[2] < min_z + 0.2, 1.0, 0.0)
+        # is_bad = jp.where(state.q[2] < min_z + 0.2, 1.0, 0.0)
 
         ctrl_cost = -jp.sum(jp.square(action))
 
@@ -158,7 +158,7 @@ class HumanoidEnv(PipelineEnv):
         # )
         # jax.debug.print("is_healthy {}, height {}", is_healthy, state.q[2], ordered=True)
 
-        total_reward = 2.0 * is_healthy + 0.1 * ctrl_cost - 5.0 * is_bad
+        total_reward = 0.1 * ctrl_cost + 5 * state.q[2]
 
         return total_reward
 
