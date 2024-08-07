@@ -159,7 +159,7 @@ class HumanoidEnv(PipelineEnv):
         # )
         # jax.debug.print("is_healthy {}, height {}", is_healthy, state.q[2], ordered=True)
 
-        total_reward = jp.clip(0.1 * ctrl_cost + 5 * is_healthy, -1e8, 10.0)
+        total_reward = 0.1 * ctrl_cost + 5 * state.q[2]
 
         return total_reward
 

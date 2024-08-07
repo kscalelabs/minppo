@@ -1,6 +1,8 @@
 """Trains a policy network to get a humanoid to stand up."""
 
 import argparse
+from functools import partial
+import wandb
 import logging
 import os
 from dataclasses import dataclass, field
@@ -46,6 +48,7 @@ class Config:
     entropy_coeff: float = field(default=0.01, metadata={"help": "Coefficient for entropy loss."})
 
 
+# NOTE: change how initialize weights?
 class Actor(eqx.Module):
     """Actor network for PPO."""
 
@@ -209,7 +212,7 @@ def train_step(
     # Normalizing advantages *in minibatch* according to Trick #7
     advants_b = (advants_b - advants_b.mean()) / (advants_b.std() + 1e-8)
 
-    @eqx.filter_value_and_grad
+    @partial(eqx.filter_value_and_grad, has_aux=True)
     def actor_loss_fn(actor: Actor) -> Array:
         """Prioritizing advantageous actions over more training."""
         mu_b, std_b = actor_vmap(actor, states_b)
@@ -340,9 +343,13 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
 
             total_actor_loss += actor_loss.mean().item()
             total_critic_loss += critic_loss.mean().item()
+            total_entropy_loss += entropy_loss.item()
+            total_fraction_clipped += fraction_clipped.item()
 
         mean_actor_loss = total_actor_loss / (n // config.batch_size)
         mean_critic_loss = total_critic_loss / (n // config.batch_size)
+        mean_entropy_loss = total_entropy_loss / (n // config.batch_size)
+        mean_fraction_clipped = total_fraction_clipped / (n // config.batch_size)
 
         logger.info(f"Mean Actor Loss: {mean_actor_loss}, Mean Critic Loss: {mean_critic_loss}")
 
@@ -573,6 +580,8 @@ def main() -> None:
         score_avg = float(jnp.mean(jnp.array(scores)))
         pbar.close()
         logger.info("Episode %s score is %.2f", episodes, score_avg)
+        
+        wandb.log({"score": score_avg, "episode": episodes})
 
         wandb.log({"score": score_avg, "episode": episodes})
 
@@ -602,3 +611,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    wandb.init(project="humanoid-ppo", config=vars(config))
