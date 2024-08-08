@@ -142,8 +142,6 @@ class HumanoidEnv(PipelineEnv):
         is_healthy = jp.where(state.q[2] < min_z, 0.0, 1.0)
         is_healthy = jp.where(state.q[2] > max_z, 0.0, is_healthy)
 
-        # is_bad = jp.where(state.q[2] < min_z + 0.2, 1.0, 0.0)
-
         ctrl_cost = -jp.sum(jp.square(action))
 
         # xpos = state.subtree_com[1][0]
@@ -159,7 +157,7 @@ class HumanoidEnv(PipelineEnv):
         # )
         # jax.debug.print("is_healthy {}, height {}", is_healthy, state.q[2], ordered=True)
 
-        total_reward = jp.clip(0.1 * ctrl_cost + 5 * is_healthy, -1e8, 10.0)
+        total_reward = 0.1 * ctrl_cost + 5 * is_healthy
 
         return total_reward
 
@@ -186,17 +184,7 @@ class HumanoidEnv(PipelineEnv):
             data.qfrc_actuator,
         ]
 
-        def clean_component(component: jp.ndarray) -> jp.ndarray:
-            # Check for NaNs or Infs and replace them
-            nan_mask = jp.isnan(component)
-            inf_mask = jp.isinf(component)
-            component = jp.where(nan_mask, 0.0, component)
-            component = jp.where(inf_mask, jp.where(component > 0, 1e6, -1e6), component)
-            return component
-
-        cleaned_components = [clean_component(comp) for comp in obs_components]
-
-        return jp.concatenate(cleaned_components)
+        return jp.concatenate(obs_components)
 
 
 def run_environment_adhoc() -> None:

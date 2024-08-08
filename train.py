@@ -4,6 +4,7 @@ import argparse
 import logging
 import os
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Dict, List, Tuple
 
 import equinox as eqx
@@ -30,10 +31,10 @@ class Config:
     num_iterations: int = field(default=15000, metadata={"help": "Number of environment simulation iterations."})
     num_envs: int = field(default=32, metadata={"help": "Number of environments to run at once with vectorization."})
     max_steps_per_episode: int = field(
-        default=128 * 32, metadata={"help": "Maximum number of steps per episode (across ALL environments)."}
+        default=512 * 32, metadata={"help": "Maximum number of steps per episode (across ALL environments)."}
     )
     max_steps_per_iteration: int = field(
-        default=512 * 32,
+        default=1024 * 32,
         metadata={
             "help": "Maximum number of steps per iteration of simulating environments (across ALL environments)."
         },
@@ -152,10 +153,14 @@ class Ppo:
             init_value=config.lr_critic, end_value=1e-6, transition_steps=total_timesteps
         )
 
+        clip_threshold = 1.0
         # eps below according to Trick #3
-        self.actor_optim = optax.chain(optax.adam(learning_rate=self.actor_schedule, eps=1e-5))
+        self.actor_optim = optax.chain(
+            optax.clip_by_global_norm(clip_threshold), optax.adam(learning_rate=self.actor_schedule, eps=1e-5)
+        )
         self.critic_optim = optax.chain(
-            optax.adamw(learning_rate=self.critic_schedule, weight_decay=config.l2_rate, eps=1e-5)
+            optax.clip_by_global_norm(clip_threshold),
+            optax.adamw(learning_rate=self.critic_schedule, weight_decay=config.l2_rate, eps=1e-5),
         )
 
         # Initialize optimizer states
@@ -222,8 +227,12 @@ def train_step(
         # Clipping is done to prevent too much change if new advantages are very large
         clipped_loss_b = jnp.clip(ratio_b, 1.0 - config.epsilon, 1.0 + config.epsilon) * advants_b
 
-        actor_loss = -jnp.mean(jnp.minimum(surrogate_loss_b, clipped_loss_b))
-        entropy_loss = jnp.mean(0.5 * (jnp.log(2 * jnp.pi * std_b**2) + 1))
+        # Choosing the smallest magnitude loss
+        actor_loss = -jnp.mean(
+            jnp.where(jnp.abs(surrogate_loss_b) < jnp.abs(clipped_loss_b), surrogate_loss_b, clipped_loss_b)
+        )
+
+        entropy_loss = jnp.mean(0.5 * (jnp.log(2 * jnp.pi * (std_b + 1e-8) ** 2) + 1))
 
         total_loss = actor_loss - config.entropy_coeff * entropy_loss
         return total_loss
@@ -293,8 +302,6 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
     # Calculate values for all states
     critic_vmap = jax.vmap(apply_critic, in_axes=(None, 0))
     values = critic_vmap(ppo.critic, states).squeeze()
-
-    # NOTE: are the output shapes correct?
 
     # Calculate GAE and returns
     returns, advantages = get_gae(rewards, masks, values, config)
@@ -520,16 +527,13 @@ def main() -> None:
                     jnp.std(states.obs, axis=1, keepdims=True) + 1e-8
                 )
                 next_obs, rewards, dones = norm_obs, states.reward, states.done
-                masks = (1 - dones).astype(jnp.float32)
+                masks = (1 - 0.8 * dones).astype(jnp.float32)
 
                 # Update memory
                 new_data = {"states": obs, "actions": actions, "rewards": rewards, "masks": masks}
                 memory = update_memory(memory, new_data)
 
                 score += rewards
-
-                if jnp.any(jnp.isnan(rewards)):
-                    print(rewards)
 
                 obs = next_obs
                 steps += config.num_envs
@@ -558,8 +562,6 @@ def main() -> None:
                             states = reset_fn(reset_rng)
                             break
 
-            # with open("log_" + args.env_name + ".txt", "a") as outfile:
-            #     outfile.write("\t" + str(episodes) + "\t" + str(jnp.mean(score)) + "\n")
             scores.append(jnp.mean(score))
 
             memory = reorder_memory(memory, config.num_envs)
@@ -571,6 +573,7 @@ def main() -> None:
             train(ppo, train_memory, config)
 
         score_avg = float(jnp.mean(jnp.array(scores)))
+
         pbar.close()
         logger.info("Episode %s score is %.2f", episodes, score_avg)
 
