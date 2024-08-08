@@ -10,3 +10,15 @@
 - first thing to become nans seems to be actor loss and scores. after that, everything becomes nans
 
 - fixed entropy epsilon. hope this works now.
+
+
+- training clipped mus right now
+
+- `equinox.internal.debug_backward_nan`
+- JAX_DEBUG_NANS=1
+
+- lr = 0 still nan in minimum example
+- problem maybe in gradient clipping? as per https://github.com/google/jax/discussions/6440
+- ^nope
+
+- i think its a problem with the clipping
