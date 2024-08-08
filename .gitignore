@@ -19,6 +19,7 @@ out*/
 *.stl
 *.txt
 *.mp4
+*.notes
 
 environments/
 screenshots/

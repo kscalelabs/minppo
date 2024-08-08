@@ -4,7 +4,6 @@ import argparse
 import logging
 import os
 from dataclasses import dataclass, field
-from functools import partial
 from typing import Any, Dict, List, Tuple
 
 import equinox as eqx
@@ -167,14 +166,14 @@ class Ppo:
         self.actor_opt_state = self.actor_optim.init(eqx.filter(self.actor, eqx.is_array))
         self.critic_opt_state = self.critic_optim.init(eqx.filter(self.critic, eqx.is_array))
 
-    def get_params(self) -> Tuple[Any]:
+    def get_params(self) -> Dict[str, Any]:
         """Get the parameters of the PPO model."""
-        return (
-            self.actor,
-            self.critic,
-            self.actor_opt_state,
-            self.critic_opt_state,
-        )
+        return {
+            "actor": self.actor,
+            "critic": self.critic,
+            "actor_opt_state": self.actor_opt_state,
+            "critic_opt_state": self.critic_opt_state,
+        }
 
     def update_params(self, new_params: Dict[str, Any]) -> None:
         """Update the parameters of the PPO model."""
@@ -197,7 +196,7 @@ def apply_actor(actor: Critic, state: Array) -> Array:
 def train_step(
     actor_optim: optax.GradientTransformation,
     critic_optim: optax.GradientTransformation,
-    params: Tuple[Any],
+    params: Dict[str, Any],
     states_b: Array,
     actions_b: Array,
     returns_b: Array,
@@ -206,7 +205,7 @@ def train_step(
     config: Config,
 ) -> Tuple[Dict[str, Any], Tuple[Array, Array]]:
     """Perform a single training step with PPO parameters."""
-    actor, critic, actor_opt_state, critic_opt_state = params
+    actor, critic, actor_opt_state, critic_opt_state = params.values()
 
     actor_vmap = jax.vmap(apply_actor, in_axes=(None, 0))
     critic_vmap = jax.vmap(apply_critic, in_axes=(None, 0))
@@ -214,8 +213,8 @@ def train_step(
     # Normalizing advantages *in minibatch* according to Trick #7
     advants_b = (advants_b - advants_b.mean()) / (advants_b.std() + 1e-4)
 
-    @partial(eqx.filter_value_and_grad, has_aux=True)
-    def actor_loss_fn(actor: Actor, states_b, actions_b, advants_b) -> Array:
+    @eqx.filter_value_and_grad
+    def actor_loss_fn(actor: Actor) -> Array:
         """Prioritizing advantageous actions over more training."""
         mu_b, std_b = actor_vmap(actor, states_b)
         new_log_prob_b = actor_log_prob(mu_b, std_b, actions_b)
@@ -228,48 +227,33 @@ def train_step(
         clipped_loss_b = jnp.clip(ratio_b, 1.0 - config.epsilon, 1.0 + config.epsilon) * advants_b
 
         # Choosing the smallest magnitude loss
-        actor_loss = -jnp.mean(
-            jnp.where(jnp.abs(surrogate_loss_b) < jnp.abs(clipped_loss_b), surrogate_loss_b, clipped_loss_b)
-        )
-
-        # Keeping track of number of losses that are clipped
-        clipped_losses = jnp.abs(surrogate_loss_b) >= jnp.abs(clipped_loss_b)
-        fraction_clipped = jnp.mean(clipped_losses)
+        actor_loss = -jnp.mean(jnp.minimum(surrogate_loss_b, clipped_loss_b))
 
         entropy_loss = jnp.mean(0.5 * (jnp.log(2 * jnp.pi * (std_b + 1e-4) ** 2) + 1))
 
         total_loss = actor_loss - config.entropy_coeff * entropy_loss
-        return total_loss, (
-            ratio_b,
-            entropy_loss,
-            actor_loss,
-            surrogate_loss_b,
-            clipped_loss_b,
-            fraction_clipped,
-            new_log_prob_b,
-            old_log_prob_b,
-        )
+        return total_loss
 
     @eqx.filter_value_and_grad
-    def critic_loss_fn(critic: Critic, states_b, returns_b) -> Array:
+    def critic_loss_fn(critic: Critic) -> Array:
         """Prioritizing being able to predict the ground truth returns."""
         critic_returns_b = critic_vmap(critic, states_b).squeeze()
         critic_loss = jnp.mean((critic_returns_b - returns_b) ** 2)
         return critic_loss
 
     # Calculating actor loss and updating actor parameters --- outputting auxillary data for logging
-    (actor_loss, values), actor_grads = actor_loss_fn(actor, states_b, actions_b, advants_b)
+    actor_loss, actor_grads = actor_loss_fn(actor)
     actor_updates, new_actor_opt_state = actor_optim.update(actor_grads, actor_opt_state, params=actor)
     new_actor = eqx.apply_updates(actor, actor_updates)
 
     if config.minimal:
         breakpoint()
 
-    if jnp.any(jnp.isnan(actor_loss)) or jnp.any(jnp.isinf(values[0])):
+    if jnp.any(jnp.isnan(actor_loss)):
         breakpoint()
 
     # Calculating critic loss and updating critic parameters
-    critic_loss, critic_grads = critic_loss_fn(critic, states_b, returns_b)
+    critic_loss, critic_grads = critic_loss_fn(critic)
     critic_updates, new_critic_opt_state = critic_optim.update(critic_grads, critic_opt_state, params=critic)
     new_critic = eqx.apply_updates(critic, critic_updates)
 
@@ -386,7 +370,6 @@ def train(ppo: Ppo, memory: List[Tuple[Array, Array, Array, Array]], config: Con
 
 def actor_log_prob(mu: Array, sigma: Array, actions: Array) -> Array:
     """Calculate the log probability of the actions given the actor network's output."""
-
     # Summing across the number of actions after logpdf of each relative to mu/sigma, determined by state
     return jax.scipy.stats.norm.logpdf(actions, mu, sigma + 1e-4).sum(axis=1)
 
