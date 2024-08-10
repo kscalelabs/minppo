@@ -76,7 +76,7 @@ class HumanoidEnv(PipelineEnv):
 
     initial_qpos: jp.ndarray
     _action_size: int
-    reset_noise_scale: float = 0
+    reset_noise_scale: float = 1e-4
 
     def __init__(self, n_frames: int = 1) -> None:
         """Initializes system with initial joint positions, action size, the model, and update rate."""
@@ -155,7 +155,7 @@ class HumanoidEnv(PipelineEnv):
         #     next_xpos,
         #     ordered=True,
         # )
-        # jax.debug.print("is_healthy {}, height {}", is_healthy, state.q[2], ordered=True)
+        # jax.debug.print("ctrl_cost {}, is_healthy {}, height {}", ctrl_cost, is_healthy, state.q[2], ordered=True)
 
         total_reward = 0.1 * ctrl_cost + 5 * is_healthy
 

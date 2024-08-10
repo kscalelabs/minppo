@@ -10,10 +10,10 @@ import mediapy as media
 from jax import Array
 
 from environment import HumanoidEnv
-from train import Actor, choose_action
+from train import choose_action, Actor, Critic
 
 
-def load_models(actor_path: str, critic_path: str) -> Tuple[Array, Array]:
+def load_models(actor_path: str, critic_path: str) -> Tuple[Actor, Critic]:
     """Loads the pretrained actor and critic models from paths."""
     with open(actor_path, "rb") as f:
         actor_params = pickle.load(f)
@@ -25,9 +25,16 @@ def load_models(actor_path: str, critic_path: str) -> Tuple[Array, Array]:
 def main() -> None:
     """Runs inference with pretrained models."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--actor_path", type=str, default="actor_params.pkl", help="path to actor model")
-    parser.add_argument("--critic_path", type=str, default="critic_params.pkl", help="path to critic model")
-    parser.add_argument("--num_episodes", type=int, default=1, help="number of episodes to run")
+    parser.add_argument(
+        "--actor_path",
+        type=str,
+        default="models/im_goated_actor_20.pkl",
+        help="path to actor model",
+    )
+    parser.add_argument(
+        "--critic_path", type=str, default="models/height_based_reward_critic_1090.pkl", help="path to critic model"
+    )
+    parser.add_argument("--num_episodes", type=int, default=10, help="number of episodes to run")
     parser.add_argument("--max_steps", type=int, default=1000, help="maximum steps per episode")
     parser.add_argument("--video_path", type=str, default="inference_video.mp4", help="path to save video")
     parser.add_argument("--render_every", type=int, default=2, help="how many frames to skip between renders")
@@ -39,8 +46,7 @@ def main() -> None:
     env = HumanoidEnv()
     rng = jax.random.PRNGKey(0)
 
-    actor_params, _ = load_models(args.actor_path, args.critic_path)
-    actor = Actor(input_size=env.observation_size, action_size=env.action_size, key=rng)
+    actor, _ = load_models(args.actor_path, args.critic_path)
 
     reset_fn = jax.jit(env.reset)
     step_fn = jax.jit(env.step)
@@ -50,7 +56,7 @@ def main() -> None:
     rollout: list[Any] = []
 
     for episode in range(args.num_episodes):
-        rng, reset_rng = jax.rand.split(rng)
+        rng, reset_rng = jax.random.split(rng)
         state = reset_fn(reset_rng)
         obs = state.obs
 
@@ -60,7 +66,8 @@ def main() -> None:
             if len(rollout) < max_frames:
                 rollout.append(state.pipeline_state)
 
-            action = choose_action(actor_params, obs, actor)
+            rng, action_rng = jax.random.split(rng)
+            action = choose_action(actor, obs, action_rng)
             state = step_fn(state, action)
             obs = state.obs
             total_reward += state.reward
