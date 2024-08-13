@@ -76,7 +76,7 @@ class HumanoidEnv(PipelineEnv):
 
     initial_qpos: jp.ndarray
     _action_size: int
-    reset_noise_scale: float = 1e-4
+    reset_noise_scale: float = 2e-4
 
     def __init__(self, n_frames: int = 1) -> None:
         """Initializes system with initial joint positions, action size, the model, and update rate."""
@@ -137,7 +137,7 @@ class HumanoidEnv(PipelineEnv):
 
     def compute_reward(self, state: MjxState, next_state: MjxState, action: jp.ndarray) -> jp.ndarray:
         """Compute the reward for standing and height."""
-        min_z, max_z = 0.7, 2.0
+        min_z, max_z = 0, 2.0
         # min_z, max_z = -0.35, 2.0
         is_healthy = jp.where(state.q[2] < min_z, 0.0, 1.0)
         is_healthy = jp.where(state.q[2] > max_z, 0.0, is_healthy)
@@ -157,7 +157,7 @@ class HumanoidEnv(PipelineEnv):
         # )
         # jax.debug.print("ctrl_cost {}, is_healthy {}, height {}", ctrl_cost, is_healthy, state.q[2], ordered=True)
 
-        total_reward = 0.1 * ctrl_cost + 5 * is_healthy
+        total_reward = 0.1 * ctrl_cost + 5 * state.q[2]
 
         return total_reward
 
@@ -167,7 +167,7 @@ class HumanoidEnv(PipelineEnv):
         com_height = state.q[2]
 
         # Set a termination threshold
-        termination_height = 0.7
+        termination_height = 0
         # termination_height = -0.35
 
         # Episode is done if the robot falls below the termination height

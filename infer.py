@@ -7,10 +7,9 @@ from typing import Any, Tuple
 import jax
 import jax.numpy as jnp
 import mediapy as media
-from jax import Array
 
 from environment import HumanoidEnv
-from train import choose_action, Actor, Critic
+from train import Actor, Critic, choose_action
 
 
 def load_models(actor_path: str, critic_path: str) -> Tuple[Actor, Critic]:
@@ -28,7 +27,7 @@ def main() -> None:
     parser.add_argument(
         "--actor_path",
         type=str,
-        default="models/im_goated_actor_20.pkl",
+        default="models/more_envs_actor_70.pkl",
         help="path to actor model",
     )
     parser.add_argument(
@@ -38,7 +37,7 @@ def main() -> None:
     parser.add_argument("--max_steps", type=int, default=1000, help="maximum steps per episode")
     parser.add_argument("--video_path", type=str, default="inference_video.mp4", help="path to save video")
     parser.add_argument("--render_every", type=int, default=2, help="how many frames to skip between renders")
-    parser.add_argument("--video_length", type=float, default=10.0, help="desired length of video in seconds")
+    parser.add_argument("--video_length", type=float, default=20.0, help="desired length of video in seconds")
     parser.add_argument("--width", type=int, default=640, help="width of the video frame")
     parser.add_argument("--height", type=int, default=480, help="height of the video frame")
     args = parser.parse_args()

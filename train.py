@@ -1,11 +1,18 @@
 """Trains a policy network to get a humanoid to stand up."""
 
 import argparse
+import atexit
+import contextlib
+import datetime
 import logging
 import os
 import pickle
 from dataclasses import dataclass, field
 from functools import partial
+import shutil
+import signal
+import distrax
+import sys
 from typing import Any, Dict, Tuple
 
 import equinox as eqx
@@ -24,9 +31,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Config:
-    lr_actor: float = field(default=2.5e-4, metadata={"help": "Learning rate for the actor network."})
-    lr_critic: float = field(default=2.5e-4, metadata={"help": "Learning rate for the critic network."})
-    num_iterations: int = field(default=15000, metadata={"help": "Number of environment simulation iterations."})
+    lr_actor: float = field(default=3e-4, metadata={"help": "Learning rate for the actor network."})
+    lr_critic: float = field(default=3e-4, metadata={"help": "Learning rate for the critic network."})
+    num_iterations: int = field(default=1500, metadata={"help": "Number of environment simulation iterations."})
     num_envs: int = field(default=32, metadata={"help": "Number of environments to run at once with vectorization."})
     max_steps_per_episode: int = field(
         default=512,
@@ -36,24 +43,29 @@ class Config:
         default=4,
         metadata={"help": "Maximum number of episodes per iteration before running collected data through train."},
     )
+    minibatch_size: int = field(
+        default=64, metadata={"help": "Minibatch size for batching training episodes from a data collection cycle."}
+    )
     gamma: float = field(default=0.99, metadata={"help": "Discount factor for future rewards."})
     lambd: float = field(default=0.95, metadata={"help": "Lambda parameter for GAE calculation."})
-    minibatch_size: int = field(
-        default=32, metadata={"help": "Minibatch size for batching training episodes from a data collection cycle."}
-    )
     epsilon: float = field(default=0.2, metadata={"help": "Clipping parameter for PPO."})
-    l2_rate: float = field(default=0.000, metadata={"help": "L2 regularization rate for the critic."})
-    entropy_coeff: float = field(default=0.01, metadata={"help": "Coefficient for entropy loss."})
+    l2_rate: float = field(default=0.001, metadata={"help": "L2 regularization rate for the critic."})
+    entropy_coeff: float = field(default=0.01, metadata={"help": "Coefficient for entropy loss."})  # 0.01
     minimal: bool = field(default=False, metadata={"help": "Make minimal PPO (no std) for breakpoint debugging"})
+    anneal_on_train_step: bool = field(
+        default=False, metadata={"help": "Whether to anneal learning rate on train() or train_step()"}
+    )
 
 
 # Separate actor/critic models
 class Actor(eqx.Module):
     """Actor network for PPO."""
 
+    # Defined parameters for Equinox to learn
     linear1: eqx.nn.Linear
     linear2: eqx.nn.Linear
     mu_layer: eqx.nn.Linear
+    log_std: Array
     log_sigma_layer: eqx.nn.Linear
 
     def __init__(self, input_size: int, action_size: int, key: Array) -> None:
@@ -61,6 +73,10 @@ class Actor(eqx.Module):
         self.linear1 = eqx.nn.Linear(input_size, 256, key=keys[0])
         self.linear2 = eqx.nn.Linear(256, 256, key=keys[1])
         self.mu_layer = eqx.nn.Linear(256, action_size, key=keys[2])
+
+        # learnable parameter for general std
+        self.log_std = jnp.zeros(action_size)
+
         self.log_sigma_layer = eqx.nn.Linear(256, action_size, key=keys[3])
 
         # Orthogonal parameter initialization according to Trick #2
@@ -74,11 +90,13 @@ class Actor(eqx.Module):
         x = jax.nn.tanh(self.linear2(x))
         mu = self.mu_layer(x)
 
-        # State-dependent standard deviation very similar results to state-independent
-        log_sigma = self.log_sigma_layer(x)
+        # State-independent standard deviation
+        # log_std = jnp.broadcast_to(self.log_std, mu.shape)
 
-        # return mu, jnp.zeros_like(log_sigma)
-        return mu, jnp.exp(log_sigma)
+        # State-dependent standard deviation
+        log_std = self.log_sigma_layer(x)
+
+        return mu, jnp.exp(log_std)
 
     def initialize_layer(self, layer: eqx.nn.Linear, scale: float, key: Array) -> eqx.nn.Linear:
         weight_shape = layer.weight.shape
@@ -148,20 +166,26 @@ class Ppo:
         self.actor = Actor(observation_size, action_size, subkey1)
         self.critic = Critic(observation_size, subkey2)
 
-        total_timesteps = config.max_episodes_per_iteration * config.num_iterations
+        if config.anneal_on_train_step:
+            # Number times train() ran * number of times train_step() ran inside train()
+            num_minibatches = (config.max_steps_per_episode) // config.minibatch_size
+            total_timesteps = (config.max_episodes_per_iteration * config.num_iterations) * num_minibatches
+        else:
+            # Annealing at each call of train()
+            total_timesteps = config.max_episodes_per_iteration * config.num_iterations
 
         # Learning rate annealing according to Trick #4
         self.actor_schedule = optax.linear_schedule(
-            init_value=config.lr_actor, end_value=config.lr_actor, transition_steps=total_timesteps
+            init_value=config.lr_actor, end_value=0, transition_steps=total_timesteps
         )
-        self.critic_schedule = optax.linear_schedule(
-            init_value=config.lr_critic, end_value=config.lr_actor, transition_steps=total_timesteps
-        )
-
+        
         # eps below according to Trick #3
-        self.actor_optim = optax.chain(optax.adam(learning_rate=self.actor_schedule, eps=1e-5))
+        self.actor_optim = optax.chain(
+            optax.clip_by_global_norm(0.5), optax.adam(learning_rate=self.actor_schedule, eps=1e-5)
+        )
         self.critic_optim = optax.chain(
-            optax.adamw(learning_rate=self.critic_schedule, weight_decay=config.l2_rate, eps=1e-5),
+            optax.clip_by_global_norm(0.5),
+            optax.adamw(learning_rate=config.lr_critic, weight_decay=config.l2_rate, eps=1e-5),
         )
 
         # Initialize optimizer states
@@ -207,6 +231,7 @@ def train_step(
     old_log_prob_b: Array,
     epsilon: float = 0.2,
     entropy_coeff: float = 0.01,
+    critic_coeff: float = 0.5,
     minimal: bool = False,
 ) -> Tuple[Tuple[Any], Tuple[Array, Array]]:
     """Perform a single training step with PPO parameters."""
@@ -245,6 +270,7 @@ def train_step(
         """Prioritizing being able to predict the ground truth returns."""
         critic_returns_b = critic_vmap(critic, states_b).squeeze()
         critic_loss = jnp.mean((critic_returns_b - returns_b) ** 2)
+
         return critic_loss
 
     # Calculating actor loss and updating actor parameters --- outputting auxillary data for logging
@@ -278,27 +304,50 @@ def get_gae(rewards: Array, masks: Array, values: Array, config: Config) -> Tupl
 
     def gae_step(carry: Tuple[Array, Array], inp: Tuple[Array, Array, Array]) -> Tuple[Tuple[Array, Array], Array]:
         """Single step of Generalized Advantage Estimation to be iterated over."""
-        advantages, last_advantage, last_value = carry
-
-        reward, mask, value, t = inp
-        delta = reward + config.gamma * last_value * mask - value
-        last_advantage = delta + config.gamma * config.lambd * mask * last_advantage
-
-        advantages = advantages.at[t].set(last_advantage)
-
-        return (advantages, last_advantage, value), None
+        gae, next_value = carry
+        reward, mask, value = inp
+        delta = reward + config.gamma * next_value * mask - value
+        gae = delta + config.gamma * config.lambd * mask * gae
+        return (gae, value), gae
 
     # Calculating reward, with combination of immediate reward and diminishing value of future rewards
-    (advantages, _, _), _ = jax.lax.scan(
+    _, advantages = jax.lax.scan(
         f=gae_step,
-        init=(jnp.zeros_like(rewards), jnp.array(0.0), jnp.array(0.0)),
-        xs=(rewards, masks, values, jnp.arange(len(rewards))),  # NOTE: correct direction?
+        init=(jnp.zeros_like(rewards[-1]), values[-1]),
+        xs=(rewards, masks, values),  # NOTE: correct direction?
         reverse=True,
     )
-
     returns = advantages + values
-
     return returns, advantages
+
+
+# NOTE: should do next value stuff?
+# def get_gae(rewards: Array, masks: Array, values: Array, config: Config) -> Tuple[Array, Array]:
+#     """Calculate the Generalized Advantage Estimation for rewards using jax.lax.scan."""
+
+#     def gae_step(carry: Tuple[Array, Array], inp: Tuple[Array, Array, Array]) -> Tuple[Tuple[Array, Array], Array]:
+#         """Single step of Generalized Advantage Estimation to be iterated over."""
+#         advantages, last_advantage, last_value = carry
+
+#         reward, mask, value, t = inp
+#         delta = reward + config.gamma * last_value * mask - value
+#         last_advantage = delta + config.gamma * config.lambd * mask * last_advantage
+
+#         advantages = advantages.at[t].set(last_advantage)
+
+#         return (advantages, last_advantage, value), None
+
+#     # Calculating reward, with combination of immediate reward and diminishing value of future rewards
+#     (advantages, _, _), _ = jax.lax.scan(
+#         f=gae_step,
+#         init=(jnp.zeros_like(rewards), jnp.array(0.0), jnp.array(0.0)),
+#         xs=(rewards, masks, values, jnp.arange(len(rewards))),  # NOTE: correct direction?
+#         reverse=True,
+#     )
+
+#     returns = advantages + values
+
+#     return returns, advantages
 
 
 def train(ppo: Ppo, states: Array, actions: Array, rewards: Array, masks: Array, config: Config) -> None:
@@ -336,7 +385,7 @@ def train(ppo: Ppo, states: Array, actions: Array, rewards: Array, masks: Array,
         critic_optim = ppo.critic_optim
 
         def scan_body(carry: Tuple[Dict[str, Any], Tuple[float, float]], batch_indices: Array) -> Tuple[Tuple, None]:
-            """Scan function to run through training loop quicker"""
+            """Scan function to run through training loop quicker."""
             params, total_losses = carry
 
             # Batching the data
@@ -413,7 +462,7 @@ def choose_action(actor: Actor, obs: Array, rng: Array) -> Array:
     return action
 
 
-#################### MODEL SAVING ####################
+#################### MODEL SAVING + DEBUG ####################
 
 
 def save_models(ppo: Ppo, iteration: int, save_dir: str, env_name: str) -> None:
@@ -429,7 +478,57 @@ def save_models(ppo: Ppo, iteration: int, save_dir: str, env_name: str) -> None:
     with open(critic_path, "wb") as f:
         pickle.dump(ppo.critic, f)
 
-    logger.info(f"Saved models at iteration {iteration} to {save_dir}")
+    logger.info(f"Saved models at iteration {iteration} to {actor_path} and {critic_path}")
+
+
+class StdoutCapture:
+    def __init__(self, dir):
+        self.dir = dir
+        # Ensure the directory exists
+        if not os.path.exists(self.dir):
+            os.makedirs(self.dir)
+        self.captured_output = []
+
+        self.timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        backup_file_path = os.path.join(self.dir, f"{self.timestamp}.backup")
+        shutil.copy(__file__, backup_file_path)
+        logger.info(f"Backed up file to {backup_file_path}")
+
+    def write(self, text):
+        self.captured_output.append(text)
+        sys.__stdout__.write(text)
+
+    def flush(self):
+        sys.__stdout__.flush()
+
+    def save_output(self):
+        output_file_path = os.path.join(self.dir, f"{self.timestamp}.out")
+        logger.info(output_file_path)
+        with open(output_file_path, "w") as f:
+            f.writelines(self.captured_output)
+
+
+def setup_interrupt_handling(stdout_capture):
+    def signal_handler(signum, frame):
+        logger.info("\nInterrupt received. Saving output and exiting...")
+        stdout_capture.save_output()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    atexit.register(stdout_capture.save_output)
+
+
+def print_config_and_args(config, args):
+    logger.info("Configuration:")
+    for key, value in vars(config).items():
+        print(f"  {key}: {value}")
+    logger.info("\nArguments:")
+    for key, value in vars(args).items():
+        print(f"  {key}: {value}")
+    logger.info("\n")
 
 
 def main() -> None:
@@ -450,9 +549,14 @@ def main() -> None:
     parser.add_argument("--envs_to_sample", type=int, default=4, help="number of environments to sample for video")
     parser.add_argument("--save_every", type=int, default=10, help="save models every N iterations")
     parser.add_argument("--save_dir", type=str, default="models", help="directory to save models")
+
+    # testing
+    parser.add_argument("--debug", action="store_true", help="whether to log whole file and config/args")
+    parser.add_argument("--anneal_on_train_step", action="store_true", help="whether to log whole file and config/args")
     args = parser.parse_args()
 
     config = Config()
+    config.anneal_on_train_step = args.anneal_on_train_step
 
     env = HumanoidEnv()
     observation_size = env.observation_size
@@ -476,93 +580,127 @@ def main() -> None:
     ppo = Ppo(observation_size, action_size, config, rng)
     episodes: int = 0
 
-    for i in range(1, config.num_iterations + 1):
-        # Initialize memory as JAX arrays
-        scores = []
-        rng, reset_rng = jax.random.split(rng)
-        states = reset_fn(reset_rng)
+    if args.debug:
+        stdout_capture = StdoutCapture(f"logs/{args.env_name}")
+        setup_interrupt_handling(stdout_capture)
+        stdout_context = contextlib.redirect_stdout(stdout_capture)
+    else:
+        # If not using StdoutCapture, use a dummy context manager that does nothing
+        @contextlib.contextmanager
+        def dummy_context_manager():
+            yield
 
-        for _ in range(config.max_episodes_per_iteration):
-            episodes += config.num_envs
+        stdout_context = dummy_context_manager()
 
-            # Normalizing observations improves training
-            norm_obs = (states.obs - jnp.mean(states.obs, axis=1, keepdims=True)) / (
-                jnp.std(states.obs, axis=1, keepdims=True) + 1e-4
-            )
+    with stdout_context:
+        print_config_and_args(config, args)
 
-            # Initialize memory as full matrices of zeros
-            memory = {
-                "states": jnp.zeros((config.max_steps_per_episode, config.num_envs, observation_size)),
-                "actions": jnp.zeros((config.max_steps_per_episode, config.num_envs, action_size)),
-                "rewards": jnp.zeros((config.max_steps_per_episode, config.num_envs)),
-                "masks": jnp.zeros((config.max_steps_per_episode, config.num_envs)),
-                # "step number": jnp.zeros((config.max_steps_per_episode, config.num_envs)),
-            }
+        # NOTE: should start doing > output.txt
+        for i in range(1, config.num_iterations + 1):
+            # Initialize memory as JAX arrays
+            scores = []
+            rng, reset_rng = jax.random.split(rng)
+            states = reset_fn(reset_rng)
 
-            def step_loop(carry, t: int) -> Tuple[Tuple, None]:
-                """Environment step/data collection function to be scanned quickly."""
-                rng, obs, states, memory, score = carry
-
-                # Calculating actions
-                rng, *action_rng = jax.random.split(rng, num=config.num_envs + 1)
-                actions = jax.vmap(choose_action, in_axes=(None, 0, 0))(ppo.actor, obs, jnp.array(action_rng))
-                actions_clipped = jnp.clip(actions, -1.0, 1.0)
-                next_states = step_fn(states, actions_clipped)
+            for _ in range(config.max_episodes_per_iteration):
+                # NOTE: this actually repeats the same starting states? higher max episodes is better?
+                # NOTE: this shouldnt be expected behavior which means there's a greater bug
+                # NOTE: training loop should actually track prev obs maybe, so as if training on
+                # small blocks from episode
+                episodes += config.num_envs
 
                 # Normalizing observations improves training
-                norm_obs = (next_states.obs - jnp.mean(next_states.obs, axis=1, keepdims=True)) / (
-                    jnp.std(next_states.obs, axis=1, keepdims=True) + 1e-4
+                norm_obs = (states.obs - jnp.mean(states.obs, axis=1, keepdims=True)) / (
+                    jnp.std(states.obs, axis=1, keepdims=True) + 1e-4
                 )
 
-                # Check for NaNs in obs or actions and set values to zero if NaNs are found
-                nan_mask = (
-                    jnp.any(jnp.isnan(norm_obs)) | jnp.any(jnp.isnan(actions)) | jnp.any(jnp.isnan(next_states.reward))
-                )
-                rewards = jnp.where(nan_mask, jnp.zeros_like(next_states.reward), next_states.reward)
-                norm_obs = jnp.where(nan_mask, jnp.zeros_like(norm_obs), norm_obs)
-                actions = jnp.where(nan_mask, jnp.zeros_like(actions), actions)
-
-                dones = next_states.done
-                masks = (1 - dones).astype(jnp.float32)
-
-                # Update memory at the current timestep
+                # Initialize memory as full matrices of zeros
                 memory = {
-                    "states": memory["states"].at[t].set(obs),
-                    "actions": memory["actions"].at[t].set(actions),
-                    "rewards": memory["rewards"].at[t].set(rewards),
-                    "masks": memory["masks"].at[t].set(masks),
-                    # "step number": memory["step number"].at[t].set(jnp.array([t] * config.num_envs)),
+                    "states": jnp.zeros((config.max_steps_per_episode, config.num_envs, observation_size)),
+                    "actions": jnp.zeros((config.max_steps_per_episode, config.num_envs, action_size)),
+                    "rewards": jnp.zeros((config.max_steps_per_episode, config.num_envs)),
+                    "masks": jnp.zeros((config.max_steps_per_episode, config.num_envs)),
+                    # "step number": jnp.zeros((config.max_steps_per_episode, config.num_envs)),
                 }
 
-                new_score = score + rewards * masks
+                def step_loop(carry, t: int) -> Tuple[Tuple, None]:
+                    """Environment step/data collection function to be scanned quickly."""
+                    rng, obs, states, memory, score = carry
 
-                return (rng, norm_obs, next_states, memory, new_score), None
+                    # Calculating actions
+                    rng, *action_rng = jax.random.split(rng, num=config.num_envs + 1)
+                    actions = jax.vmap(choose_action, in_axes=(None, 0, 0))(ppo.actor, obs, jnp.array(action_rng))
+                    next_states = step_fn(states, actions)
 
-            (final_rng, final_obs, final_states, final_memory, final_score), _ = jax.lax.scan(
-                step_loop,
-                (rng, norm_obs, states, memory, jnp.zeros(config.num_envs)),
-                xs=jnp.arange(config.max_steps_per_episode),
-            )
+                    # Normalizing observations improves training
+                    norm_obs = (next_states.obs - jnp.mean(next_states.obs, axis=1, keepdims=True)) / (
+                        jnp.std(next_states.obs, axis=1, keepdims=True) + 1e-4
+                    )
 
-            rng = final_rng
-            scores.append(jnp.mean(final_score))
+                    # Check for NaNs in obs or actions and set values to zero if NaNs are found
+                    nan_mask = (
+                        jnp.any(jnp.isnan(norm_obs))
+                        | jnp.any(jnp.isnan(actions))
+                        | jnp.any(jnp.isnan(next_states.reward))
+                    )
+                    rewards = jnp.where(nan_mask, jnp.zeros_like(next_states.reward), next_states.reward)
+                    norm_obs = jnp.where(nan_mask, jnp.zeros_like(norm_obs), norm_obs)
+                    actions = jnp.where(nan_mask, jnp.zeros_like(actions), actions)
+                    dones = jnp.where(nan_mask, jnp.ones_like(next_states.done), next_states.done)
 
-            # We want all episodes that are of the same environment to be adjacent in memory (hence, n t)
-            states_memory = rearrange(final_memory["states"], "t n obs_size -> (n t) obs_size")
-            actions_memory = rearrange(final_memory["actions"], "t n action_size -> (n t) action_size")
-            rewards_memory = rearrange(final_memory["rewards"], "t n -> (n t)")
-            masks_memory = rearrange(final_memory["masks"], "t n -> (n t)")
+                    # nan_mask = (
+                    #     jnp.isnan(norm_obs)
+                    #     | jnp.isnan(actions)
+                    #     | jnp.isnan(next_states.reward)
+                    # )
+                    # rewards = jnp.where(nan_mask, jnp.zeros_like(next_states.reward), next_states.reward)
+                    # norm_obs = jnp.where(nan_mask, jnp.zeros_like(norm_obs), norm_obs)
+                    # actions = jnp.where(nan_mask, jnp.zeros_like(actions), actions)
+                    # dones = jnp.where(nan_mask, jnp.ones_like(next_states.done), next_states.done)
 
-            # Technically, all this "memory" is a batch
-            train(ppo, states_memory, actions_memory, rewards_memory, masks_memory, config)
+                    masks = (1 - dones).astype(jnp.float32)
 
-        score_avg = float(jnp.mean(jnp.array(scores)))
-        logger.info("Episode %s score of iteration %d is %.2f", episodes, i, score_avg)
+                    # Update memory at the current timestep
+                    memory = {
+                        "states": memory["states"].at[t].set(obs),
+                        "actions": memory["actions"].at[t].set(actions),
+                        "rewards": memory["rewards"].at[t].set(rewards),
+                        "masks": memory["masks"].at[t].set(masks),
+                        # "step number": memory["step number"].at[t].set(jnp.array([t] * config.num_envs)),
+                    }
 
-        if args.save_every and i % args.save_every == 0:
-            path = os.path.join(args.save_dir, f"{args.env_name}_actor_{i}.pkl")
-            logging.info("saving actor to %s", path)
-            save_models(ppo, i, args.save_dir, args.env_name)
+                    new_score = score + rewards * masks
+
+                    return (rng, norm_obs, next_states, memory, new_score), None
+
+                (final_rng, final_obs, final_states, final_memory, final_score), _ = jax.lax.scan(
+                    step_loop,
+                    (rng, norm_obs, states, memory, jnp.zeros(config.num_envs)),
+                    xs=jnp.arange(config.max_steps_per_episode),
+                )
+
+                rng = final_rng
+                scores.append(jnp.mean(final_score))
+                rng, reset_rng = jax.random.split(rng)
+                states = reset_fn(reset_rng)
+
+                if jnp.any(final_score > 1500) or jnp.any(final_score < -1500):
+                    breakpoint()
+
+                # We want all episodes that are of the same environment to be adjacent in memory (hence, n t)
+                states_memory = rearrange(final_memory["states"], "t n obs_size -> (n t) obs_size")
+                actions_memory = rearrange(final_memory["actions"], "t n action_size -> (n t) action_size")
+                rewards_memory = rearrange(final_memory["rewards"], "t n -> (n t)")
+                masks_memory = rearrange(final_memory["masks"], "t n -> (n t)")
+
+                # Technically, all this "memory" is a batch
+                train(ppo, states_memory, actions_memory, rewards_memory, masks_memory, config)
+
+            score_avg = float(jnp.mean(jnp.array(scores)))
+            logger.info("Episode %s score of iteration %d is %.2f", episodes, i, score_avg)
+
+            if args.save_every and i % args.save_every == 0:
+                save_models(ppo, i, args.save_dir, args.env_name)
 
 
 if __name__ == "__main__":

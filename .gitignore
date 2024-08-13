@@ -27,3 +27,4 @@ scratch/
 assets/
 wandb/
 models/
+logs/
