@@ -6,11 +6,13 @@ import os
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import jax
-import jax.numpy as jp
+import jax.numpy as jnp
 import mujoco
 from brax import base
 from brax.envs.base import PipelineEnv, State
@@ -18,6 +20,34 @@ from brax.io import mjcf
 from brax.mjx.base import State as MjxState
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RewardConfig:
+    termination_height: float = field(default=-0.2)
+    height_min_z: float = field(default=-0.2)
+    height_max_z: float = field(default=2.0)
+    is_healthy_reward: float = field(default=5)
+    original_pos_reward_exp_coefficient: float = field(default=2)
+    original_pos_reward_subtraction_factor: float = field(default=0.2)
+    original_pos_reward_max_diff_norm: float = field(default=0.5)
+    ctrl_cost_coefficient: float = field(default=0.1)
+    weights_ctrl_cost: float = field(default=0.1)
+    weights_original_pos_reward: float = field(default=1)
+    weights_is_healthy: float = field(default=5)
+    weights_velocity: float = field(default=1.25)
+
+
+REPO_DIR = "humanoid_original"  # humanoid_original or stompy or dora
+XML_NAME = "humanoid.xml"  # dora2
+
+# keyframe for default positions (or None for self.sys.qpos0)
+KEYFRAME_NAME = "default"
+print(f"using {KEYFRAME_NAME} from {REPO_DIR}/{XML_NAME}")
+
+# my testing :)
+INCLUDE_C_VALS = True
+PHYSICS_FRAMES = 1
 
 
 def download_model_files(repo_url: str, repo_dir: str, local_path: str) -> None:
@@ -74,117 +104,196 @@ class HumanoidEnv(PipelineEnv):
             simulation.
     """
 
-    initial_qpos: jp.ndarray
+    initial_qpos: jnp.ndarray
     _action_size: int
-    reset_noise_scale: float = 0
+    reset_noise_scale: float = 0.0
 
-    def __init__(self, n_frames: int = 1) -> None:
+    def __init__(self, n_frames: int = PHYSICS_FRAMES, backend: str = "mjx") -> None:
         """Initializes system with initial joint positions, action size, the model, and update rate."""
         # GitHub repository URL
         repo_url = "https://github.com/nathanjzhao/mujoco-models.git"
-
-        # Directory within the repository containing the model files
-        repo_dir = "humanoid"
 
         # Local path where the files should be saved
         environments_path = os.path.join(os.path.dirname(__file__), "environments")
 
         # Download or update the model files
-        download_model_files(repo_url, repo_dir, environments_path)
+        download_model_files(repo_url, REPO_DIR, environments_path)
 
         # Now use the local path to load the model
-        xml_path = os.path.join(environments_path, repo_dir, "humanoid.xml")
+        xml_path = os.path.join(environments_path, REPO_DIR, XML_NAME)
         mj_model: mujoco.MjModel = mujoco.MjModel.from_xml_path(xml_path)
-        # self.initial_qpos = jp.array(mj_model.keyframe("default").qpos)
+
+        # can definitely look at this more https://mujoco.readthedocs.io/en/latest/APIreference/APItypes.html#mjtdisablebit
+        mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
+        mj_model.opt.iterations = 1
+        mj_model.opt.ls_iterations = 4
 
         self._action_size = mj_model.nu
         sys: base.System = mjcf.load_model(mj_model)
 
-        super().__init__(sys, n_frames=n_frames, backend="mjx")
+        super().__init__(sys, n_frames=n_frames, backend=backend)
 
-    def reset(self, rng: jp.ndarray) -> State:
+        try:
+            if KEYFRAME_NAME:
+                self.initial_qpos = jnp.array(mj_model.keyframe(self.keyframe_name).qpos)
+        except:
+            self.initial_qpos = jnp.array(sys.qpos0)
+            print("No keyframe found, utilizing qpos0")
+
+        actuator_ctrlrange = []
+        for i in range(mj_model.nu):
+            ctrlrange = mj_model.actuator_ctrlrange[i]
+            actuator_ctrlrange.append(ctrlrange)
+
+        self.actuator_ctrlrange = jnp.array(actuator_ctrlrange)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def reset(self, rng: jnp.ndarray) -> State:
         """Resets the environment to an initial state."""
         rng, rng1, rng2 = jax.random.split(rng, 3)
 
         low, hi = -self.reset_noise_scale, self.reset_noise_scale
-
-        qpos = self.sys.qpos0 + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
-        # qpos = self.initial_qpos + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
+        qpos = self.initial_qpos + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
         qvel = jax.random.uniform(rng2, (self.sys.nv,), minval=low, maxval=hi)
 
         # initialize mjx state
         state = self.pipeline_init(qpos, qvel)
-        obs = self.get_obs(state, jp.zeros(self._action_size))
-        reward, done, zero = jp.zeros(3)
+        obs = self.get_obs(state, jnp.zeros(self._action_size))
+        metrics = {
+            "episode_returns": 0,
+            "episode_lengths": 0,
+            "returned_episode_returns": 0,
+            "returned_episode_lengths": 0,
+            "timestep": 0,
+            "returned_episode": False,
+        }
 
-        metrics: dict[str, Any] = {}
+        return State(state, obs, jnp.array(0.0), False, metrics)
 
-        return State(state, obs, reward, done, metrics)
-
-    def step(self, env_state: State, action: jp.ndarray) -> State:
+    @partial(jax.jit, static_argnums=(0,))
+    def step(self, env_state: State, action: jnp.ndarray, rng: jnp.ndarray) -> State:
         """Run one timestep of the environment's dynamics and returns observations with rewards."""
         state = env_state.pipeline_state
-        next_state = self.pipeline_step(state, action)
+        metrics = env_state.metrics
 
-        obs = self.get_obs(state, action)
+        state_step = self.pipeline_step(state, action)  # because scaled action so bad...
+        obs_state = self.get_obs(state, action)
 
-        reward = self.compute_reward(state, next_state, action)
+        # reset env if done
+        rng, rng1, rng2 = jax.random.split(rng, 3)
+        low, hi = -self.reset_noise_scale, self.reset_noise_scale
 
-        # Termination condition
-        done = self.is_done(next_state)
+        qpos = self.initial_qpos + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
+        qvel = jax.random.uniform(rng2, (self.sys.nv,), minval=low, maxval=hi)
+        state_reset = self.pipeline_init(qpos, qvel)
+        obs_reset = self.get_obs(state, jnp.zeros(self._action_size))
 
-        return env_state.replace(pipeline_state=next_state, obs=obs, reward=reward, done=done)
+        # get obs/reward/done of action + states
+        reward = self.compute_reward(
+            state,
+            state_step,
+            action,
+        )
+        done = self.is_done(state_step)
 
-    def compute_reward(self, state: MjxState, next_state: MjxState, action: jp.ndarray) -> jp.ndarray:
+        # setting done = True if nans in next state
+        is_nan = jax.tree_util.tree_map(lambda x: jnp.any(jnp.isnan(x)), state_step)
+        any_nan = jax.tree_util.tree_reduce(jnp.logical_or, is_nan, initializer=False)
+        done = jnp.logical_or(done, any_nan)
+
+        # selectively replace state/obs with reset environment based on if done
+        new_state = jax.tree.map(lambda x, y: jax.lax.select(done, x, y), state_reset, state_step)
+        obs = jax.lax.select(done, obs_reset, obs_state)
+
+        ########### METRIC TRACKING ###########
+
+        # Calculate new episode return and length
+        new_episode_return = metrics["episode_returns"] + reward
+        new_episode_length = metrics["episode_lengths"] + 1
+
+        # Update metrics -- we only count episode
+        metrics["episode_returns"] = new_episode_return * (1 - done)
+        metrics["episode_lengths"] = new_episode_length * (1 - done)
+        metrics["returned_episode_returns"] = (
+            metrics["returned_episode_returns"] * (1 - done) + new_episode_return * done
+        )
+        metrics["returned_episode_lengths"] = (
+            metrics["returned_episode_lengths"] * (1 - done) + new_episode_length * done
+        )
+        metrics["timestep"] = metrics["timestep"] + 1
+        metrics["returned_episode"] = done
+
+        return env_state.replace(pipeline_state=new_state, obs=obs, reward=reward, done=done, metrics=metrics)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def compute_reward(
+        self,
+        state: MjxState,
+        next_state: MjxState,
+        action: jnp.ndarray,
+    ) -> jnp.ndarray:
         """Compute the reward for standing and height."""
-        min_z, max_z = 0.7, 2.0
-        # min_z, max_z = -0.35, 2.0
-        is_healthy = jp.where(state.q[2] < min_z, 0.0, 1.0)
-        is_healthy = jp.where(state.q[2] > max_z, 0.0, is_healthy)
+        min_z, max_z = (
+            REWARD_CONFIG["height_limits"]["min_z"],
+            REWARD_CONFIG["height_limits"]["max_z"],
+        )
 
-        ctrl_cost = -jp.sum(jp.square(action))
+        is_healthy = jnp.where(state.q[2] < min_z, 0.0, 1.0)
+        is_healthy = jnp.where(state.q[2] > max_z, 0.0, is_healthy)
+        ctrl_cost = -jnp.sum(jnp.square(action))
 
-        # xpos = state.subtree_com[1][0]
-        # next_xpos = next_state.subtree_com[1][0]
-        # velocity = (next_xpos - xpos) / self.dt
+        xpos = state.subtree_com[1][0]
+        next_xpos = next_state.subtree_com[1][0]
+        velocity = (next_xpos - xpos) / self.dt
 
-        # jax.debug.print(
-        #     "velocity {}, xpos {}, next_xpos {}",
-        #     velocity,
-        #     xpos,
-        #     next_xpos,
-        #     ordered=True,
-        # )
-        # jax.debug.print("is_healthy {}, height {}", is_healthy, state.q[2], ordered=True)
-
-        total_reward = 0.1 * ctrl_cost + 5 * is_healthy
+        total_reward = (
+            REWARD_CONFIG["weights"]["ctrl_cost"] * ctrl_cost
+            + REWARD_CONFIG["weights"]["ctrl_cost"] * velocity
+            + REWARD_CONFIG["weights"]["is_healthy"] * is_healthy
+        )
 
         return total_reward
 
-    def is_done(self, state: MjxState) -> jp.ndarray:
+    @partial(jax.jit, static_argnums=(0,))
+    def is_done(self, state: MjxState) -> bool:
         """Check if the episode should terminate."""
         # Get the height of the robot's center of mass
         com_height = state.q[2]
 
-        # Set a termination threshold
-        termination_height = 0.7
-        # termination_height = -0.35
+        min_z, max_z = (
+            REWARD_CONFIG["height_limits"]["min_z"],
+            REWARD_CONFIG["height_limits"]["max_z"],
+        )
+        height_condition = jnp.logical_not(jnp.logical_and(min_z < com_height, com_height < max_z))
 
-        # Episode is done if the robot falls below the termination height
-        done = jp.where(com_height < termination_height, 1.0, 0.0)
+        # Check if any element in qvel or qacc exceeds 1e5
+        velocity_condition = jnp.any(jnp.abs(state.qvel) > 1e5)
 
-        return done
+        # Combine conditions
+        condition = jnp.logical_or(height_condition, velocity_condition)
 
-    def get_obs(self, data: MjxState, action: jp.ndarray) -> jp.ndarray:
-        obs_components = [
-            data.qpos[2:],
-            data.qvel,
-            data.cinert[1:].ravel(),
-            data.cvel[1:].ravel(),
-            data.qfrc_actuator,
-        ]
+        return condition
 
-        return jp.concatenate(obs_components)
+    @partial(jax.jit, static_argnums=(0,))
+    def get_obs(self, data: MjxState, action: jnp.ndarray) -> jnp.ndarray:
+        if INCLUDE_C_VALS:
+            # slicing cinert and cvel because always zeroes
+            # no longer slicing qpos
+            obs_components = [
+                data.qpos,
+                data.qvel,
+                data.cinert[1:].ravel(),
+                data.cvel[1:].ravel(),
+                data.qfrc_actuator,
+            ]
+        else:
+            obs_components = [
+                data.qpos,
+                data.qvel,
+                data.qfrc_actuator,
+            ]
+
+        return jnp.concatenate(obs_components)
 
 
 def run_environment_adhoc() -> None:
@@ -197,12 +306,32 @@ def run_environment_adhoc() -> None:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--actor_path", type=str, default="actor_params.pkl", help="path to actor model")
-    parser.add_argument("--critic_path", type=str, default="critic_params.pkl", help="path to critic model")
+    parser.add_argument(
+        "--critic_path",
+        type=str,
+        default="critic_params.pkl",
+        help="path to critic model",
+    )
     parser.add_argument("--num_episodes", type=int, default=20, help="number of episodes to run")
-    parser.add_argument("--max_steps", type=int, default=200, help="maximum steps per episode")
-    parser.add_argument("--video_path", type=str, default="inference_video.mp4", help="path to save video")
-    parser.add_argument("--render_every", type=int, default=2, help="how many frames to skip between renders")
-    parser.add_argument("--video_length", type=float, default=10.0, help="desired length of video in seconds")
+    parser.add_argument("--max_steps", type=int, default=1024, help="maximum steps per episode")
+    parser.add_argument(
+        "--env_name",
+        type=str,
+        default="random",
+        help="path to save video",
+    )
+    parser.add_argument(
+        "--render_every",
+        type=int,
+        default=2,
+        help="how many frames to skip between renders",
+    )
+    parser.add_argument(
+        "--video_length",
+        type=float,
+        default=5.0,
+        help="desired length of video in seconds",
+    )
     parser.add_argument("--width", type=int, default=640, help="width of the video frame")
     parser.add_argument("--height", type=int, default=480, help="height of the video frame")
     args = parser.parse_args()
@@ -218,6 +347,9 @@ def run_environment_adhoc() -> None:
     max_frames = int(args.video_length * fps)
     rollout: list[Any] = []
 
+    video_path = args.env_name + ".mp4"
+    metrics = {"qpos_2": []}
+
     for episode in range(args.num_episodes):
         rng, _ = jax.random.split(rng)
         state = reset_fn(rng)
@@ -228,25 +360,36 @@ def run_environment_adhoc() -> None:
             if len(rollout) < args.video_length * fps:
                 rollout.append(state.pipeline_state)
 
-            action = jax.random.uniform(rng, (action_size,), minval=-1.0, maxval=1.0)  # placeholder for an action
-            state = step_fn(state, action)
+            #### STORED METRICS ####
+            metrics["qpos_2"].append(state.pipeline_state.qpos[2])
+
+            rng, action_rng = jax.random.split(rng)
+            action = jax.random.uniform(action_rng, (action_size,), minval=0, maxval=1.0)  # placeholder for an action
+
+            rng, step_rng = jax.random.split(rng)
+            state = step_fn(state, action, step_rng)
             total_reward += state.reward
 
             if state.done:
                 break
 
-        logging.info(f"Episode {episode + 1} total reward: {total_reward}")
+        print(f"Episode {episode + 1} total reward: {total_reward}")
 
         if len(rollout) >= max_frames:
             break
 
-    # Trim rollout to desired length
-    rollout = rollout[:max_frames]
+    logger.info("Rendering video with %d frames at %d fps", len(rollout), fps)
+    images = jnp.array(
+        env.render(
+            rollout[:: args.render_every],
+            # camera="side",
+            width=args.width,
+            height=args.height,
+        )
+    )
 
-    images = jp.array(env.render(rollout[:: args.render_every], camera="side", width=args.width, height=args.height))
-    logging.info(f"Rendering video with {len(images)} frames at {fps} fps")
-    media.write_video(args.video_path, images, fps=fps)
-    logging.info(f"Video saved to {args.video_path}")
+    logger.info("Saving video to %s", video_path)
+    media.write_video(video_path, images, fps=fps)
 
 
 if __name__ == "__main__":

@@ -4,10 +4,11 @@
 tqdm
 
 # Environment
-jax
 brax
-optax
+distrax
 equinox
+jax
+optax
 
 # Configuration management.
 omegaconf
