@@ -4,7 +4,6 @@ import argparse
 import logging
 import os
 from dataclasses import dataclass, field
-from functools import partial
 from typing import Any, Dict, List, Tuple
 
 import equinox as eqx
@@ -13,12 +12,12 @@ import jax.numpy as jnp
 import mediapy as media
 import numpy as np
 import optax
+import wandb
 from brax.envs import State
 from brax.mjx.base import State as MjxState
 from jax import Array
 from tqdm import tqdm
 
-import wandb
 from environment import HumanoidEnv
 
 logger = logging.getLogger(__name__)
