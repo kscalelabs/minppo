@@ -1,12 +1,12 @@
 """Definition of base humanoids environment with reward system and termination conditions."""
 
 import argparse
-from functools import partial
 import logging
 import os
 import shutil
 import subprocess
 import tempfile
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +17,6 @@ from brax import base
 from brax.envs.base import PipelineEnv, State
 from brax.io import mjcf
 from brax.mjx.base import State as MjxState
-
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +65,7 @@ def download_model_files(repo_url: str, repo_dir: str, local_path: str) -> None:
 
     # Check if the target directory already exists
     if target_path.exists():
-        logger.info(
-            f"Model files are already present in {target_path}. Skipping download."
-        )
+        logger.info(f"Model files are already present in {target_path}. Skipping download.")
         return
 
     # Create a temporary directory for cloning
@@ -138,9 +135,7 @@ class HumanoidEnv(PipelineEnv):
 
         try:
             if KEYFRAME_NAME:
-                self.initial_qpos = jnp.array(
-                    mj_model.keyframe(self.keyframe_name).qpos
-                )
+                self.initial_qpos = jnp.array(mj_model.keyframe(self.keyframe_name).qpos)
         except:
             self.initial_qpos = jnp.array(sys.qpos0)
             print("No keyframe found, utilizing qpos0")
@@ -158,9 +153,7 @@ class HumanoidEnv(PipelineEnv):
         rng, rng1, rng2 = jax.random.split(rng, 3)
 
         low, hi = -self.reset_noise_scale, self.reset_noise_scale
-        qpos = self.initial_qpos + jax.random.uniform(
-            rng1, (self.sys.nq,), minval=low, maxval=hi
-        )
+        qpos = self.initial_qpos + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
         qvel = jax.random.uniform(rng2, (self.sys.nv,), minval=low, maxval=hi)
 
         # initialize mjx state
@@ -183,18 +176,14 @@ class HumanoidEnv(PipelineEnv):
         state = env_state.pipeline_state
         metrics = env_state.metrics
 
-        state_step = self.pipeline_step(
-            state, action
-        )  # because scaled action so bad...
+        state_step = self.pipeline_step(state, action)  # because scaled action so bad...
         obs_state = self.get_obs(state, action)
 
         # reset env if done
         rng, rng1, rng2 = jax.random.split(rng, 3)
         low, hi = -self.reset_noise_scale, self.reset_noise_scale
 
-        qpos = self.initial_qpos + jax.random.uniform(
-            rng1, (self.sys.nq,), minval=low, maxval=hi
-        )
+        qpos = self.initial_qpos + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
         qvel = jax.random.uniform(rng2, (self.sys.nv,), minval=low, maxval=hi)
         state_reset = self.pipeline_init(qpos, qvel)
         obs_reset = self.get_obs(state, jnp.zeros(self._action_size))
@@ -213,9 +202,7 @@ class HumanoidEnv(PipelineEnv):
         done = jnp.logical_or(done, any_nan)
 
         # selectively replace state/obs with reset environment based on if done
-        new_state = jax.tree.map(
-            lambda x, y: jax.lax.select(done, x, y), state_reset, state_step
-        )
+        new_state = jax.tree.map(lambda x, y: jax.lax.select(done, x, y), state_reset, state_step)
         obs = jax.lax.select(done, obs_reset, obs_state)
 
         ########### METRIC TRACKING ###########
@@ -236,9 +223,7 @@ class HumanoidEnv(PipelineEnv):
         metrics["timestep"] = metrics["timestep"] + 1
         metrics["returned_episode"] = done
 
-        return env_state.replace(
-            pipeline_state=new_state, obs=obs, reward=reward, done=done, metrics=metrics
-        )
+        return env_state.replace(pipeline_state=new_state, obs=obs, reward=reward, done=done, metrics=metrics)
 
     @partial(jax.jit, static_argnums=(0,))
     def compute_reward(
@@ -261,9 +246,9 @@ class HumanoidEnv(PipelineEnv):
 
         # MAINTAINING ORIGINAL POSITION REWARD
         qpos0_diff = self.initial_qpos - state.qpos
-        original_pos_reward = jnp.exp(
-            -exp_coef * jnp.linalg.norm(qpos0_diff)
-        ) - subtraction_factor * jnp.clip(jnp.linalg.norm(qpos0_diff), 0, max_diff_norm)
+        original_pos_reward = jnp.exp(-exp_coef * jnp.linalg.norm(qpos0_diff)) - subtraction_factor * jnp.clip(
+            jnp.linalg.norm(qpos0_diff), 0, max_diff_norm
+        )
 
         # HEALTHY REWARD
         is_healthy = jnp.where(state.q[2] < min_z, 0.0, 1.0)
@@ -275,7 +260,6 @@ class HumanoidEnv(PipelineEnv):
         next_xpos = next_state.subtree_com[1][0]
         velocity = (next_xpos - xpos) / self.dt
 
-
         # Calculate and print each weight * reward pairing
         ctrl_cost_weighted = REWARD_CONFIG["weights"]["ctrl_cost"] * ctrl_cost
         original_pos_reward_weighted = REWARD_CONFIG["weights"]["original_pos_reward"] * original_pos_reward
@@ -284,12 +268,7 @@ class HumanoidEnv(PipelineEnv):
 
         # jax.debug.print("ctrl_cost_weighted: {}, original_pos_reward_weighted: {}, is_healthy_weighted {}, velocity_weighted: {}", ctrl_cost_weighted, original_pos_reward_weighted, is_healthy_weighted, velocity_weighted)
 
-        total_reward = (
-            ctrl_cost_weighted
-            + original_pos_reward_weighted
-            + velocity_weighted
-            + is_healthy_weighted
-        )
+        total_reward = ctrl_cost_weighted + original_pos_reward_weighted + velocity_weighted + is_healthy_weighted
 
         return total_reward
 
@@ -303,9 +282,7 @@ class HumanoidEnv(PipelineEnv):
             REWARD_CONFIG["height_limits"]["min_z"],
             REWARD_CONFIG["height_limits"]["max_z"],
         )
-        height_condition = jnp.logical_not(
-            jnp.logical_and(min_z < com_height, com_height < max_z)
-        )
+        height_condition = jnp.logical_not(jnp.logical_and(min_z < com_height, com_height < max_z))
 
         # Check if any element in qvel or qacc exceeds 1e5
         velocity_condition = jnp.any(jnp.abs(state.qvel) > 1e5)
@@ -349,21 +326,15 @@ def run_environment_adhoc() -> None:
         raise ImportError("Please install `mediapy` and `tqdm` to run this script")
 
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--actor_path", type=str, default="actor_params.pkl", help="path to actor model"
-    )
+    parser.add_argument("--actor_path", type=str, default="actor_params.pkl", help="path to actor model")
     parser.add_argument(
         "--critic_path",
         type=str,
         default="critic_params.pkl",
         help="path to critic model",
     )
-    parser.add_argument(
-        "--num_episodes", type=int, default=20, help="number of episodes to run"
-    )
-    parser.add_argument(
-        "--max_steps", type=int, default=1024, help="maximum steps per episode"
-    )
+    parser.add_argument("--num_episodes", type=int, default=20, help="number of episodes to run")
+    parser.add_argument("--max_steps", type=int, default=1024, help="maximum steps per episode")
     parser.add_argument(
         "--env_name",
         type=str,
@@ -382,12 +353,8 @@ def run_environment_adhoc() -> None:
         default=5.0,
         help="desired length of video in seconds",
     )
-    parser.add_argument(
-        "--width", type=int, default=640, help="width of the video frame"
-    )
-    parser.add_argument(
-        "--height", type=int, default=480, help="height of the video frame"
-    )
+    parser.add_argument("--width", type=int, default=640, help="width of the video frame")
+    parser.add_argument("--height", type=int, default=480, help="height of the video frame")
     args = parser.parse_args()
 
     env = HumanoidEnv()
@@ -410,9 +377,7 @@ def run_environment_adhoc() -> None:
 
         total_reward = 0
 
-        for step in tqdm(
-            range(args.max_steps), desc=f"Episode {episode + 1} Steps", leave=False
-        ):
+        for step in tqdm(range(args.max_steps), desc=f"Episode {episode + 1} Steps", leave=False):
             if len(rollout) < args.video_length * fps:
                 rollout.append(state.pipeline_state)
 
@@ -420,9 +385,7 @@ def run_environment_adhoc() -> None:
             metrics["qpos_2"].append(state.pipeline_state.qpos[2])
 
             rng, action_rng = jax.random.split(rng)
-            action = jax.random.uniform(
-                action_rng, (action_size,), minval=0, maxval=1.0
-            )  # placeholder for an action
+            action = jax.random.uniform(action_rng, (action_size,), minval=0, maxval=1.0)  # placeholder for an action
 
             rng, step_rng = jax.random.split(rng)
             state = step_fn(state, action, step_rng)

@@ -2,6 +2,7 @@
 
 import argparse
 import importlib
+import os
 import pickle
 from typing import Any
 
@@ -10,7 +11,6 @@ import jax.numpy as jnp
 import mediapy as media
 
 from train import ActorCritic
-import os
 
 os.environ["MUJOCO_GL"] = "egl"
 os.environ["DISPLAY"] = ":0"
@@ -24,15 +24,9 @@ def load_model(filename) -> ActorCritic:
 def main() -> None:
     """Runs inference with pretrained models."""
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--env_name", type=str, default="Humanoid-v2", help="name of the environment"
-    )
-    parser.add_argument(
-        "--num_episodes", type=int, default=10, help="number of episodes to run"
-    )
-    parser.add_argument(
-        "--max_steps", type=int, default=1000, help="maximum steps per episode"
-    )
+    parser.add_argument("--env_name", type=str, default="Humanoid-v2", help="name of the environment")
+    parser.add_argument("--num_episodes", type=int, default=10, help="number of episodes to run")
+    parser.add_argument("--max_steps", type=int, default=1000, help="maximum steps per episode")
 
     parser.add_argument(
         "--render_every",
@@ -46,12 +40,8 @@ def main() -> None:
         default=20.0,
         help="desired length of video in seconds",
     )
-    parser.add_argument(
-        "--width", type=int, default=640, help="width of the video frame"
-    )
-    parser.add_argument(
-        "--height", type=int, default=480, help="height of the video frame"
-    )
+    parser.add_argument("--width", type=int, default=640, help="width of the video frame")
+    parser.add_argument("--height", type=int, default=480, help="height of the video frame")
     parser.add_argument(
         "--env_module",
         type=str,
