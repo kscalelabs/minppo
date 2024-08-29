@@ -12,3 +12,6 @@ optax
 
 # Configuration management.
 omegaconf
+
+# Types
+types-tqdm

@@ -33,8 +33,8 @@ class RewardConfig:
     original_pos_reward_max_diff_norm: float = field(default=0.5)
     ctrl_cost_coefficient: float = field(default=0.1)
     weights_ctrl_cost: float = field(default=0.1)
-    weights_original_pos_reward: float = field(default=1)
-    weights_is_healthy: float = field(default=5)
+    weights_original_pos_reward: float = field(default=4)
+    weights_is_healthy: float = field(default=1)
     weights_velocity: float = field(default=1.25)
 
 
@@ -43,7 +43,7 @@ XML_NAME = "humanoid.xml"  # dora2
 
 # keyframe for default positions (or None for self.sys.qpos0)
 KEYFRAME_NAME = "default"
-print(f"using {KEYFRAME_NAME} from {REPO_DIR}/{XML_NAME}")
+logger.info("using %s from %s/%s", KEYFRAME_NAME, REPO_DIR, XML_NAME)
 
 # my testing :)
 INCLUDE_C_VALS = True
@@ -65,7 +65,7 @@ def download_model_files(repo_url: str, repo_dir: str, local_path: str) -> None:
 
     # Check if the target directory already exists
     if target_path.exists():
-        logger.info(f"Model files are already present in {target_path}. Skipping download.")
+        logger.info("Model files are already present in %s. Skipping download.", target_path)
         return
 
     # Create a temporary directory for cloning
@@ -86,9 +86,9 @@ def download_model_files(repo_url: str, repo_dir: str, local_path: str) -> None:
                 # If the target path exists, remove it first (to avoid FileExistsError)
                 shutil.rmtree(target_path)
             shutil.move(str(temp_repo_dir_path), str(target_path.parent))
-            logger.info(f"Model files downloaded to {target_path}")
+            logger.info("Model files downloaded to %s", target_path)
         else:
-            logger.info(f"The directory {repo_dir} does not exist in the repository.")
+            logger.info("The directory %s does not exist in the repository.", repo_dir)
 
 
 class HumanoidEnv(PipelineEnv):
@@ -124,9 +124,9 @@ class HumanoidEnv(PipelineEnv):
         mj_model: mujoco.MjModel = mujoco.MjModel.from_xml_path(xml_path)
 
         # can definitely look at this more https://mujoco.readthedocs.io/en/latest/APIreference/APItypes.html#mjtdisablebit
-        mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
-        mj_model.opt.iterations = 1
-        mj_model.opt.ls_iterations = 4
+        mj_model.opt.solver = mujoco.mjtSolver.mjSOL_CG
+        mj_model.opt.iterations = 6
+        mj_model.opt.ls_iterations = 6
 
         self._action_size = mj_model.nu
         sys: base.System = mjcf.load_model(mj_model)
@@ -136,10 +136,13 @@ class HumanoidEnv(PipelineEnv):
         try:
             if KEYFRAME_NAME:
                 self.initial_qpos = jnp.array(mj_model.keyframe(self.keyframe_name).qpos)
-        except:
+        except Exception:
             self.initial_qpos = jnp.array(sys.qpos0)
-            print("No keyframe found, utilizing qpos0")
+            logger.info("No keyframe found, utilizing qpos0")
 
+        self.reward_config = RewardConfig()
+
+        # Currently unused
         actuator_ctrlrange = []
         for i in range(mj_model.nu):
             ctrlrange = mj_model.actuator_ctrlrange[i]
@@ -198,7 +201,7 @@ class HumanoidEnv(PipelineEnv):
 
         # setting done = True if nans in next state
         is_nan = jax.tree_util.tree_map(lambda x: jnp.any(jnp.isnan(x)), state_step)
-        any_nan = jax.tree_util.tree_reduce(jnp.logical_or, is_nan, initializer=False)
+        any_nan = jax.tree_util.tree_reduce(jnp.logical_or, is_nan)
         done = jnp.logical_or(done, any_nan)
 
         # selectively replace state/obs with reset environment based on if done
@@ -233,46 +236,48 @@ class HumanoidEnv(PipelineEnv):
         action: jnp.ndarray,
     ) -> jnp.ndarray:
         """Compute the reward for standing and height."""
-        min_z, max_z = (
-            REWARD_CONFIG["height_limits"]["min_z"],
-            REWARD_CONFIG["height_limits"]["max_z"],
+        min_z, max_z = self.reward_config.height_min_z, self.reward_config.height_max_z
+
+        exp_coef = self.reward_config.original_pos_reward_exp_coefficient
+        subtraction_factor = self.reward_config.original_pos_reward_subtraction_factor
+        max_diff_norm = self.reward_config.original_pos_reward_max_diff_norm
+
+        # MAINTAINING ORIGINAL POSITION REWARD
+        qpos0_diff = self.initial_qpos - state.qpos
+        original_pos_reward = jnp.exp(-exp_coef * jnp.linalg.norm(qpos0_diff)) - subtraction_factor * jnp.clip(
+            jnp.linalg.norm(qpos0_diff), 0, max_diff_norm
         )
 
+        # HEALTHY REWARD
         is_healthy = jnp.where(state.q[2] < min_z, 0.0, 1.0)
         is_healthy = jnp.where(state.q[2] > max_z, 0.0, is_healthy)
+
         ctrl_cost = -jnp.sum(jnp.square(action))
 
         xpos = state.subtree_com[1][0]
         next_xpos = next_state.subtree_com[1][0]
         velocity = (next_xpos - xpos) / self.dt
 
-        total_reward = (
-            REWARD_CONFIG["weights"]["ctrl_cost"] * ctrl_cost
-            + REWARD_CONFIG["weights"]["ctrl_cost"] * velocity
-            + REWARD_CONFIG["weights"]["is_healthy"] * is_healthy
-        )
+        # Calculate and print each weight * reward pairing
+        ctrl_cost_weighted = self.reward_config.weights_ctrl_cost * ctrl_cost
+        original_pos_reward_weighted = self.reward_config.weights_original_pos_reward * original_pos_reward
+        velocity_weighted = self.reward_config.weights_velocity * velocity
+        is_healthy_weighted = self.reward_config.weights_is_healthy * is_healthy
+
+        total_reward = ctrl_cost_weighted + original_pos_reward_weighted + velocity_weighted + is_healthy_weighted
 
         return total_reward
 
     @partial(jax.jit, static_argnums=(0,))
-    def is_done(self, state: MjxState) -> bool:
+    def is_done(self, state: MjxState) -> jnp.ndarray:
         """Check if the episode should terminate."""
         # Get the height of the robot's center of mass
         com_height = state.q[2]
 
-        min_z, max_z = (
-            REWARD_CONFIG["height_limits"]["min_z"],
-            REWARD_CONFIG["height_limits"]["max_z"],
-        )
+        min_z, max_z = self.reward_config.height_min_z, self.reward_config.height_max_z
         height_condition = jnp.logical_not(jnp.logical_and(min_z < com_height, com_height < max_z))
 
-        # Check if any element in qvel or qacc exceeds 1e5
-        velocity_condition = jnp.any(jnp.abs(state.qvel) > 1e5)
-
-        # Combine conditions
-        condition = jnp.logical_or(height_condition, velocity_condition)
-
-        return condition
+        return height_condition
 
     @partial(jax.jit, static_argnums=(0,))
     def get_obs(self, data: MjxState, action: jnp.ndarray) -> jnp.ndarray:
@@ -294,6 +299,9 @@ class HumanoidEnv(PipelineEnv):
             ]
 
         return jnp.concatenate(obs_components)
+
+
+################## TEST ENVIRONMENT RUN ##################
 
 
 def run_environment_adhoc() -> None:
@@ -348,7 +356,7 @@ def run_environment_adhoc() -> None:
     rollout: list[Any] = []
 
     video_path = args.env_name + ".mp4"
-    metrics = {"qpos_2": []}
+    # metrics = {"qpos_2": []}
 
     for episode in range(args.num_episodes):
         rng, _ = jax.random.split(rng)
@@ -361,7 +369,7 @@ def run_environment_adhoc() -> None:
                 rollout.append(state.pipeline_state)
 
             #### STORED METRICS ####
-            metrics["qpos_2"].append(state.pipeline_state.qpos[2])
+            # metrics["qpos_2"].append(state.pipeline_state.qpos[2])
 
             rng, action_rng = jax.random.split(rng)
             action = jax.random.uniform(action_rng, (action_size,), minval=0, maxval=1.0)  # placeholder for an action
@@ -373,7 +381,7 @@ def run_environment_adhoc() -> None:
             if state.done:
                 break
 
-        print(f"Episode {episode + 1} total reward: {total_reward}")
+        logger.info("Episode %d total reward: %f", episode + 1, total_reward)
 
         if len(rollout) >= max_frames:
             break
@@ -382,14 +390,67 @@ def run_environment_adhoc() -> None:
     images = jnp.array(
         env.render(
             rollout[:: args.render_every],
-            # camera="side",
+            camera="side",
             width=args.width,
             height=args.height,
         )
     )
 
-    logger.info("Saving video to %s", video_path)
+    logger.info("Video rendered")
     media.write_video(video_path, images, fps=fps)
+    logger.info("Video saved to %s", video_path)
+
+    ###### ADDS DEBUG TEXT ON TOP OF VIDEO. WIP ######
+
+    # video_path = video_path
+    # cap = cv2.VideoCapture(video_path)
+
+    # if not cap.isOpened():
+    #     print(f"Error: Could not open video {video_path}")
+
+    # # Get video properties
+    # frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    # frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    # fps = cap.get(cv2.CAP_PROP_FPS)
+
+    # # Define the codec and create VideoWriter object
+    # debug_video_path = args.env_name + "_debug.mp4"
+    # fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    # out = cv2.VideoWriter(debug_video_path, fourcc, fps, (frame_width, frame_height))
+
+    # # Loop through each frame
+    # frame_index = 0
+
+    # if not out.isOpened():
+    #     print("Error: Could not open VideoWriter")
+
+    # while cap.isOpened():
+    #     ret, frame = cap.read()
+    #     if not ret:
+    #         break
+
+    #     # Write each metric on the frame
+    #     font = cv2.FONT_HERSHEY_SIMPLEX
+    #     font_scale = 1
+    #     color = (255, 0, 0)  # Blue color in BGR
+    #     thickness = 2
+    #     y_offset = 50  # Initial y position for the text
+
+    #     for key, values in metrics.items():
+    #         if frame_index < len(values):
+    #             text = f'{key}: {values[frame_index]}'
+    #             org = (50, y_offset)  # Position for the text
+    #             frame = cv2.putText(frame, text, org, font, font_scale, color, thickness, cv2.LINE_AA)
+    #             y_offset += 30  # Move to the next line for the next metric
+
+    #     # Write the frame into the output video
+    #     out.write(frame)
+    #     frame_index += 1
+
+    # # Release everything if job is finished
+    # cap.release()
+    # out.release()
+    # cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
