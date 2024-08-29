@@ -2,6 +2,7 @@
 
 import argparse
 import importlib
+import logging
 import os
 import pickle
 from typing import Any
@@ -15,8 +16,12 @@ from train import ActorCritic
 os.environ["MUJOCO_GL"] = "egl"
 os.environ["DISPLAY"] = ":0"
 
+# Add logger configuration
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
-def load_model(filename) -> ActorCritic:
+
+def load_model(filename: str) -> dict:
     with open(filename, "rb") as f:
         return pickle.load(f)
 
@@ -57,7 +62,7 @@ def main() -> None:
 
     model_path = f"models/{args.env_name}_model.pkl"
     video_path = f"videos/{args.env_name}_video.mp4"
-    print("Loading model from", model_path)
+    logger.info("Loading model from %s", model_path)
     loaded_params = load_model(model_path)
     network = ActorCritic(env.action_size, activation="tanh")
 
@@ -67,8 +72,8 @@ def main() -> None:
     fps = int(1 / env.dt)
     max_frames = int(args.video_length * fps)
     rollout: list[Any] = []
-    episode_reward = 0
-    total_reward = 0
+    episode_reward = 0.0
+    total_reward = 0.0
     rng, reset_rng = jax.random.split(rng)
     state = reset_fn(reset_rng)
 
@@ -90,7 +95,7 @@ def main() -> None:
 
         if state.done:
             episodes += 1
-            print("Episode", episodes, "reward:", episode_reward)
+            logger.info("Episode %d reward: %f", episodes, episode_reward)
             episode_reward = 0
 
         if len(rollout) >= max_frames:
@@ -119,9 +124,9 @@ def main() -> None:
     # )
 
     total_reward /= max_frames
-    print(f"Average reward: {total_reward}")
+    logger.info("Average reward: %f", total_reward)
 
-    print(f"Rendering video with {len(rollout)} frames at {fps} fps")
+    logger.info("Rendering video with %d frames at %d fps", len(rollout), fps)
     images = jnp.array(
         env.render(
             rollout[:: args.render_every],
@@ -130,9 +135,9 @@ def main() -> None:
         )
     )
 
-    print("Video rendered")
+    logger.info("Video rendered")
     media.write_video(video_path, images, fps=fps)
-    print(f"Video saved to {video_path}")
+    logger.info("Video saved to %s", video_path)
 
 
 if __name__ == "__main__":

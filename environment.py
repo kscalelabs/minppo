@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -20,22 +21,21 @@ from brax.mjx.base import State as MjxState
 
 logger = logging.getLogger(__name__)
 
-REWARD_CONFIG = {
-    "termination_height": -0.2,
-    "height_limits": {"min_z": -0.2, "max_z": 2.0},
-    "is_healthy_reward": 5,
-    "original_pos_reward": {
-        "exp_coefficient": 2,
-        "subtraction_factor": 0.05,
-        "max_diff_norm": 0.5,
-    },
-    "weights": {
-        "ctrl_cost": 0.1,
-        "original_pos_reward": 4,
-        "is_healthy": 1,
-        "velocity": 1.25,
-    },
-}
+
+@dataclass
+class RewardConfig:
+    termination_height: float = field(default=-0.2)
+    height_min_z: float = field(default=-0.2)
+    height_max_z: float = field(default=2.0)
+    is_healthy_reward: float = field(default=5)
+    original_pos_reward_exp_coefficient: float = field(default=2)
+    original_pos_reward_subtraction_factor: float = field(default=0.2)
+    original_pos_reward_max_diff_norm: float = field(default=0.5)
+    ctrl_cost_coefficient: float = field(default=0.1)
+    weights_ctrl_cost: float = field(default=0.1)
+    weights_original_pos_reward: float = field(default=4)
+    weights_is_healthy: float = field(default=1)
+    weights_velocity: float = field(default=1.25)
 
 
 REPO_DIR = "humanoid_original"  # humanoid_original or stompy or dora
@@ -43,7 +43,7 @@ XML_NAME = "humanoid.xml"  # dora2
 
 # keyframe for default positions (or None for self.sys.qpos0)
 KEYFRAME_NAME = "default"
-print(f"using {KEYFRAME_NAME} from {REPO_DIR}/{XML_NAME}")
+logger.info("using %s from %s/%s", KEYFRAME_NAME, REPO_DIR, XML_NAME)
 
 # my testing :)
 INCLUDE_C_VALS = True
@@ -65,7 +65,7 @@ def download_model_files(repo_url: str, repo_dir: str, local_path: str) -> None:
 
     # Check if the target directory already exists
     if target_path.exists():
-        logger.info(f"Model files are already present in {target_path}. Skipping download.")
+        logger.info("Model files are already present in %s. Skipping download.", target_path)
         return
 
     # Create a temporary directory for cloning
@@ -86,9 +86,9 @@ def download_model_files(repo_url: str, repo_dir: str, local_path: str) -> None:
                 # If the target path exists, remove it first (to avoid FileExistsError)
                 shutil.rmtree(target_path)
             shutil.move(str(temp_repo_dir_path), str(target_path.parent))
-            logger.info(f"Model files downloaded to {target_path}")
+            logger.info("Model files downloaded to %s", target_path)
         else:
-            logger.info(f"The directory {repo_dir} does not exist in the repository.")
+            logger.info("The directory %s does not exist in the repository.", repo_dir)
 
 
 class HumanoidEnv(PipelineEnv):
@@ -136,10 +136,13 @@ class HumanoidEnv(PipelineEnv):
         try:
             if KEYFRAME_NAME:
                 self.initial_qpos = jnp.array(mj_model.keyframe(self.keyframe_name).qpos)
-        except:
+        except Exception:
             self.initial_qpos = jnp.array(sys.qpos0)
-            print("No keyframe found, utilizing qpos0")
+            logger.info("No keyframe found, utilizing qpos0")
 
+        self.reward_config = RewardConfig()
+
+        # Currently unused
         actuator_ctrlrange = []
         for i in range(mj_model.nu):
             ctrlrange = mj_model.actuator_ctrlrange[i]
@@ -198,7 +201,7 @@ class HumanoidEnv(PipelineEnv):
 
         # setting done = True if nans in next state
         is_nan = jax.tree_util.tree_map(lambda x: jnp.any(jnp.isnan(x)), state_step)
-        any_nan = jax.tree_util.tree_reduce(jnp.logical_or, is_nan, initializer=False)
+        any_nan = jax.tree_util.tree_reduce(jnp.logical_or, is_nan)
         done = jnp.logical_or(done, any_nan)
 
         # selectively replace state/obs with reset environment based on if done
@@ -233,16 +236,11 @@ class HumanoidEnv(PipelineEnv):
         action: jnp.ndarray,
     ) -> jnp.ndarray:
         """Compute the reward for standing and height."""
-        min_z, max_z = (
-            REWARD_CONFIG["height_limits"]["min_z"],
-            REWARD_CONFIG["height_limits"]["max_z"],
-        )
+        min_z, max_z = self.reward_config.height_min_z, self.reward_config.height_max_z
 
-        exp_coef, subtraction_factor, max_diff_norm = (
-            REWARD_CONFIG["original_pos_reward"]["exp_coefficient"],
-            REWARD_CONFIG["original_pos_reward"]["subtraction_factor"],
-            REWARD_CONFIG["original_pos_reward"]["max_diff_norm"],
-        )
+        exp_coef = self.reward_config.original_pos_reward_exp_coefficient
+        subtraction_factor = self.reward_config.original_pos_reward_subtraction_factor
+        max_diff_norm = self.reward_config.original_pos_reward_max_diff_norm
 
         # MAINTAINING ORIGINAL POSITION REWARD
         qpos0_diff = self.initial_qpos - state.qpos
@@ -261,36 +259,30 @@ class HumanoidEnv(PipelineEnv):
         velocity = (next_xpos - xpos) / self.dt
 
         # Calculate and print each weight * reward pairing
-        ctrl_cost_weighted = REWARD_CONFIG["weights"]["ctrl_cost"] * ctrl_cost
-        original_pos_reward_weighted = REWARD_CONFIG["weights"]["original_pos_reward"] * original_pos_reward
-        velocity_weighted = REWARD_CONFIG["weights"]["velocity"] * velocity
-        is_healthy_weighted = REWARD_CONFIG["weights"]["is_healthy"] * is_healthy
+        ctrl_cost_weighted = self.reward_config.weights_ctrl_cost * ctrl_cost
+        original_pos_reward_weighted = self.reward_config.weights_original_pos_reward * original_pos_reward
+        velocity_weighted = self.reward_config.weights_velocity * velocity
+        is_healthy_weighted = self.reward_config.weights_is_healthy * is_healthy
 
-        # jax.debug.print("ctrl_cost_weighted: {}, original_pos_reward_weighted: {}, is_healthy_weighted {}, velocity_weighted: {}", ctrl_cost_weighted, original_pos_reward_weighted, is_healthy_weighted, velocity_weighted)
-
-        total_reward = ctrl_cost_weighted + original_pos_reward_weighted + velocity_weighted + is_healthy_weighted
+        total_reward = (
+            ctrl_cost_weighted
+            + original_pos_reward_weighted
+            + velocity_weighted
+            + is_healthy_weighted
+        )
 
         return total_reward
 
     @partial(jax.jit, static_argnums=(0,))
-    def is_done(self, state: MjxState) -> bool:
+    def is_done(self, state: MjxState) -> jnp.ndarray:
         """Check if the episode should terminate."""
         # Get the height of the robot's center of mass
         com_height = state.q[2]
 
-        min_z, max_z = (
-            REWARD_CONFIG["height_limits"]["min_z"],
-            REWARD_CONFIG["height_limits"]["max_z"],
-        )
+        min_z, max_z = self.reward_config.height_min_z, self.reward_config.height_max_z
         height_condition = jnp.logical_not(jnp.logical_and(min_z < com_height, com_height < max_z))
 
-        # Check if any element in qvel or qacc exceeds 1e5
-        velocity_condition = jnp.any(jnp.abs(state.qvel) > 1e5)
-
-        # Combine conditions
-        condition = jnp.logical_or(height_condition, velocity_condition)
-
-        return condition
+        return height_condition
 
     @partial(jax.jit, static_argnums=(0,))
     def get_obs(self, data: MjxState, action: jnp.ndarray) -> jnp.ndarray:
@@ -369,7 +361,7 @@ def run_environment_adhoc() -> None:
     rollout: list[Any] = []
 
     video_path = args.env_name + ".mp4"
-    metrics = {"qpos_2": []}
+    # metrics = {"qpos_2": []}
 
     for episode in range(args.num_episodes):
         rng, _ = jax.random.split(rng)
@@ -382,7 +374,7 @@ def run_environment_adhoc() -> None:
                 rollout.append(state.pipeline_state)
 
             #### STORED METRICS ####
-            metrics["qpos_2"].append(state.pipeline_state.qpos[2])
+            # metrics["qpos_2"].append(state.pipeline_state.qpos[2])
 
             rng, action_rng = jax.random.split(rng)
             action = jax.random.uniform(action_rng, (action_size,), minval=0, maxval=1.0)  # placeholder for an action
@@ -394,12 +386,12 @@ def run_environment_adhoc() -> None:
             if state.done:
                 break
 
-        print(f"Episode {episode + 1} total reward: {total_reward}")
+        logger.info("Episode %d total reward: %f", episode + 1, total_reward)
 
         if len(rollout) >= max_frames:
             break
 
-    print(f"Rendering video with {len(rollout)} frames at {fps} fps")
+    logger.info("Rendering video with %d frames at %d fps", len(rollout), fps)
     images = jnp.array(
         env.render(
             rollout[:: args.render_every],
@@ -409,11 +401,11 @@ def run_environment_adhoc() -> None:
         )
     )
 
-    print("Video rendered")
+    logger.info("Video rendered")
     media.write_video(video_path, images, fps=fps)
-    print(f"Video saved to {video_path}")
+    logger.info("Video saved to %s", video_path)
 
-    ###### ADDS DEBUG TEXT ON TOP OF VIDEO ######
+    ###### ADDS DEBUG TEXT ON TOP OF VIDEO. WIP ######
 
     # video_path = video_path
     # cap = cv2.VideoCapture(video_path)
