@@ -264,12 +264,7 @@ class HumanoidEnv(PipelineEnv):
         velocity_weighted = self.reward_config.weights_velocity * velocity
         is_healthy_weighted = self.reward_config.weights_is_healthy * is_healthy
 
-        total_reward = (
-            ctrl_cost_weighted
-            + original_pos_reward_weighted
-            + velocity_weighted
-            + is_healthy_weighted
-        )
+        total_reward = ctrl_cost_weighted + original_pos_reward_weighted + velocity_weighted + is_healthy_weighted
 
         return total_reward
 
