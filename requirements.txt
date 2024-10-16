@@ -2,6 +2,7 @@
 
 # Training
 tqdm
+colorlogging
 
 # Environment
 brax

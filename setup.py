@@ -41,4 +41,9 @@ setup(
     install_requires=requirements,
     tests_require=requirements_dev,
     extras_require={"dev": requirements_dev},
+    entry_points={
+        "console_scripts": [
+            "minppo=minppo.cli:main",
+        ],
+    },
 )

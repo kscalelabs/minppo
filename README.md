@@ -49,3 +49,15 @@ Additionally, you can use dot notation to override specific parameters:
 ```bash
 minppo train configs/stompy_pro.yaml 'rl.num_env_steps=1000'
 ```
+
+You can visualize the environment with:
+
+```bash
+minppo env stompy_pro
+```
+
+Finally, you can run inference on a trained model with:
+
+```bash
+minppo infer stompy_pro 'inference.model_path=path/to/model.pkl'
+```
