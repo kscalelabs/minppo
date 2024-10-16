@@ -165,7 +165,8 @@ def make_train(config: Config) -> Callable[[jnp.ndarray], TrainOutput]:
                 log_prob = pi.log_prob(action)
 
                 # Updates the environment state using the simulation.
-                rng, *step_rngs = jax.random.split(rng, config.training.num_envs + 1)
+                rng, step_rng = jax.random.split(rng)
+                step_rngs = jax.random.split(step_rng, config.training.num_envs)
                 env_state: State = step_fn(env_state, action, step_rngs)
 
                 # Normalizing observations improves training
