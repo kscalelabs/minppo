@@ -160,17 +160,25 @@ class HumanoidEnv(PipelineEnv):
 
         self.actuator_ctrlrange = jnp.array(actuator_ctrlrange)
 
-    @partial(jax.jit, static_argnums=(0,))
-    def reset(self, rng: jnp.ndarray) -> EnvState:
-        """Resets the environment to an initial state."""
-        rng, rng1, rng2 = jax.random.split(rng, 3)
-
+    def _get_reset_state(self, rng: jnp.ndarray) -> MjxState:
+        rng1, rng2 = jax.random.split(rng, 2)
         low, hi = -self.reset_noise_scale, self.reset_noise_scale
         qpos = self.initial_qpos + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
         qvel = jax.random.uniform(rng2, (self.sys.nv,), minval=low, maxval=hi)
-
-        # initialize mjx state
         state = self.pipeline_init(qpos, qvel)
+        return state
+
+    @partial(jax.jit, static_argnums=(0,))
+    def reset(self, rng: jnp.ndarray) -> EnvState:
+        """Gets the initial state of the environment.
+
+        Args:
+            rng: A JAX random number generator key.
+
+        Returns:
+            The initial state of the environment.
+        """
+        state = self._get_reset_state(rng)
         obs = self.get_obs(state, jnp.zeros(self._action_size))
 
         metrics = EnvMetrics(
@@ -186,40 +194,44 @@ class HumanoidEnv(PipelineEnv):
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, env_state: EnvState, action: jnp.ndarray, rng: jnp.ndarray) -> EnvState:
-        """Run one timestep of the environment's dynamics and returns observations with rewards."""
+        """Runs one timestep of the environment's dynamics.
+
+        Args:
+            env_state: The current state of the environment.
+            action: The action to take.
+            rng: A JAX random number generator key.
+
+        Returns:
+            The next state of the environment.
+        """
         state = env_state.pipeline_state
         metrics = env_state.metrics
 
         state_step = self.pipeline_step(state, action)
         obs_state = self.get_obs(state, action)
 
-        # reset env if done
-        rng, rng1, rng2 = jax.random.split(rng, 3)
-        low, hi = -self.reset_noise_scale, self.reset_noise_scale
+        # Resets finished environments to semi-random states.
+        state_reset = self._get_reset_state(rng)
+        obs_reset = self.get_obs(state_reset, jnp.zeros(self._action_size))
 
-        qpos = self.initial_qpos + jax.random.uniform(rng1, (self.sys.nq,), minval=low, maxval=hi)
-        qvel = jax.random.uniform(rng2, (self.sys.nv,), minval=low, maxval=hi)
-        state_reset = self.pipeline_init(qpos, qvel)
-        obs_reset = self.get_obs(state, jnp.zeros(self._action_size))
-
-        # get obs/reward/done of action + states
+        # Gets the rewards and "done" status flags for the current state.
         reward = self.compute_reward(state, state_step, action)
         done = self.is_done(state_step)
 
-        # setting done = True if nans in next state
+        # Checks if the state is NaN.
         is_nan = jax.tree_util.tree_map(lambda x: jnp.any(jnp.isnan(x)), state_step)
         any_nan = jax.tree_util.tree_reduce(jnp.logical_or, is_nan)
         done = jnp.logical_or(done, any_nan)
 
-        # selectively replace state/obs with reset environment based on if done
+        # Reset to the start state if done.
         new_state = jax.tree.map(lambda x, y: jax.lax.select(done, x, y), state_reset, state_step)
         obs = jax.lax.select(done, obs_reset, obs_state)
 
-        # Calculate new episode return and length
+        # Calculate new episode return and length.
         new_episode_return = metrics.episode_returns + reward
         new_episode_length = metrics.episode_lengths + 1
 
-        # Update metrics
+        # Update tracking metrics.
         new_metrics = EnvMetrics(
             episode_returns=new_episode_return * (1 - done),
             episode_lengths=new_episode_length * (1 - done),
@@ -241,39 +253,37 @@ class HumanoidEnv(PipelineEnv):
         min_z = self.reward_config.height_min_z
         max_z = self.reward_config.height_max_z
 
+        # Reward for maintaining the original position.
         exp_coef = self.reward_config.original_pos_reward_exp_coefficient
         subtraction_factor = self.reward_config.original_pos_reward_subtraction_factor
         max_diff_norm = self.reward_config.original_pos_reward_max_diff_norm
+        p0_pen = jnp.linalg.norm(self.initial_qpos - state.qpos)
+        original_pos_reward = jnp.exp(-exp_coef * p0_pen) - subtraction_factor * jnp.clip(p0_pen, 0, max_diff_norm)
 
-        # MAINTAINING ORIGINAL POSITION REWARD
-        qpos0_diff = self.initial_qpos - state.qpos
-        original_pos_reward = jnp.exp(-exp_coef * jnp.linalg.norm(qpos0_diff)) - subtraction_factor * jnp.clip(
-            jnp.linalg.norm(qpos0_diff), 0, max_diff_norm
-        )
-
-        # HEALTHY REWARD
+        # Reward for maintaining a "healthy" height.
         is_healthy = jnp.where(state.q[2] < min_z, 0.0, 1.0)
         is_healthy = jnp.where(state.q[2] > max_z, 0.0, is_healthy)
 
+        # Penalizes the total squared torque.
         ctrl_cost = -jnp.sum(jnp.square(action))
 
         xpos = state.subtree_com[1][0]
         next_xpos = next_state.subtree_com[1][0]
         velocity = (next_xpos - xpos) / self.dt
 
-        # Calculate and print each weight * reward pairing
+        # Weights the rewards by the weighting terms.
         ctrl_cost_weighted = self.reward_config.weights_ctrl_cost * ctrl_cost
         original_pos_reward_weighted = self.reward_config.weights_original_pos_reward * original_pos_reward
         velocity_weighted = self.reward_config.weights_velocity * velocity
         is_healthy_weighted = self.reward_config.weights_is_healthy * is_healthy
 
+        # Get a single reward.
         total_reward = ctrl_cost_weighted + original_pos_reward_weighted + velocity_weighted + is_healthy_weighted
 
         return total_reward
 
     @partial(jax.jit, static_argnums=(0,))
     def is_done(self, state: MjxState) -> jnp.ndarray:
-        """Check if the episode should terminate."""
         com_height = state.q[2]
         min_z, max_z = self.reward_config.height_min_z, self.reward_config.height_max_z
         height_condition = jnp.logical_not(jnp.logical_and(min_z < com_height, com_height < max_z))
