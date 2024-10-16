@@ -11,7 +11,7 @@ import jax
 import jax.numpy as jnp
 import mediapy as media
 
-from train import ActorCritic
+from minppo.train import ActorCritic
 
 os.environ["MUJOCO_GL"] = "egl"
 os.environ["DISPLAY"] = ":0"

@@ -18,7 +18,7 @@ from brax.io import mjcf
 from brax.mjx.base import State as MjxState
 from kscale import KScale
 
-from config import Config, load_config_from_cli
+from minppo.config import Config, load_config_from_cli
 
 logger = logging.getLogger(__name__)
 
