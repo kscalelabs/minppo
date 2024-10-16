@@ -3,7 +3,7 @@
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
+from typing import Sequence, cast
 
 from omegaconf import MISSING, OmegaConf
 
@@ -118,4 +118,5 @@ def load_config_from_cli(args: Sequence[str] | None = None) -> Config:
     config = OmegaConf.merge(config, raw_config)
     if other_args:
         config = OmegaConf.merge(config, OmegaConf.from_dotlist(other_args))
-    return config
+
+    return cast(Config, config)
