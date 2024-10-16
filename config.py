@@ -21,8 +21,8 @@ class VisualizationConfig:
     render_every: int = field(default=1)
     max_steps: int = field(default=1000)
     video_length: float = field(default=5.0)
-    video_save_path: str = field(default="episode.mp4")
     num_episodes: int = field(default=20)
+    video_save_path: str = field(default="episode.mp4")
 
 
 @dataclass
@@ -45,27 +45,40 @@ class RewardConfig:
 class ModelConfig:
     hidden_size: int = field(default=256)
     num_layers: int = field(default=2)
-    activation: str = field(default="tanh")
+    use_tanh: bool = field(default=True)
 
 
 @dataclass
-class TrainingConfig:
+class OptimizerConfig:
     lr: float = field(default=3e-4)
-    num_envs: int = field(default=2048)
-    num_steps: int = field(default=10)
-    total_timesteps: int = field(default=1_000_000_000)
-    update_epochs: int = field(default=4)
+    max_grad_norm: float = field(default=0.5)
+
+
+@dataclass
+class ReinforcementLearningConfig:
+    num_env_steps: int = field(default=10)
+    num_updates: int = field(default=10)
     num_minibatches: int = field(default=32)
     gamma: float = field(default=0.99)
     gae_lambda: float = field(default=0.95)
     clip_eps: float = field(default=0.2)
     ent_coef: float = field(default=0.0)
     vf_coef: float = field(default=0.5)
-    max_grad_norm: float = field(default=0.5)
+
+
+@dataclass
+class TrainingConfig:
+    lr: float = field(default=3e-4)
+    seed: int = field(default=1337)
+    num_envs: int = field(default=2048)
+    total_timesteps: int = field(default=1_000_000_000)
+    minibatch_size: int = field(default=64)
+    num_minibatches: int = field(default=32)
+    num_steps: int = field(default=2048)
+    update_epochs: int = field(default=4)
     anneal_lr: bool = field(default=True)
     normalize_env: bool = field(default=True)
-    physics_n_frames: int = field(default=1)
-    debug: bool = field(default=True)
+    model_save_path: str = field(default="trained_model.pkl")
 
 
 @dataclass
@@ -80,6 +93,8 @@ class Config:
     visualization: VisualizationConfig = field(default_factory=VisualizationConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
+    opt: OptimizerConfig = field(default_factory=OptimizerConfig)
+    rl: ReinforcementLearningConfig = field(default_factory=ReinforcementLearningConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     debug: bool = field(default=True)
