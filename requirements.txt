@@ -9,6 +9,7 @@ distrax
 equinox
 jax
 optax
+kscale
 
 # Configuration management.
 omegaconf
