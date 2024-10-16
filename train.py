@@ -3,7 +3,6 @@
 import logging
 import os
 import pickle
-from dataclasses import dataclass
 from typing import Any, Callable, NamedTuple, Sequence
 
 import distrax
@@ -23,16 +22,24 @@ from environment import HumanoidEnv
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class RunnerState:
+class Memory(NamedTuple):
+    done: jnp.ndarray
+    action: jnp.ndarray
+    value: jnp.ndarray
+    reward: jnp.ndarray
+    log_prob: jnp.ndarray
+    obs: jnp.ndarray
+    info: Any
+
+
+class RunnerState(NamedTuple):
     train_state: TrainState
     env_state: State
     last_obs: jnp.ndarray
     rng: jnp.ndarray
 
 
-@dataclass
-class UpdateState:
+class UpdateState(NamedTuple):
     train_state: TrainState
     mem_batch: "Memory"
     advantages: jnp.ndarray
@@ -40,8 +47,7 @@ class UpdateState:
     rng: jnp.ndarray
 
 
-@dataclass
-class TrainOutput:
+class TrainOutput(NamedTuple):
     runner_state: RunnerState
     metrics: Any
 
@@ -76,16 +82,6 @@ class ActorCritic(nn.Module):
         return pi, jnp.squeeze(critic, axis=-1)
 
 
-class Memory(NamedTuple):
-    done: jnp.ndarray
-    action: jnp.ndarray
-    value: jnp.ndarray
-    reward: jnp.ndarray
-    log_prob: jnp.ndarray
-    obs: jnp.ndarray
-    info: Any
-
-
 def save_model(params: FrozenDict, filename: str) -> None:
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     with open(filename, "wb") as f:
@@ -98,10 +94,7 @@ def make_train(config: Config) -> Callable[[jnp.ndarray], TrainOutput]:
     num_updates = config.training.total_timesteps // config.training.num_steps // config.training.num_envs
     minibatch_size = config.training.num_envs * config.training.num_steps // config.training.num_minibatches
 
-    env = HumanoidEnv(
-        n_frames=config.environment.n_frames,
-        kscale_id=config.kscale_id,
-    )
+    env = HumanoidEnv(config)
 
     def linear_schedule(count: int) -> float:
         frac = 1.0 - (count // (minibatch_size * config.training.update_epochs)) / num_updates
@@ -299,8 +292,12 @@ def make_train(config: Config) -> Callable[[jnp.ndarray], TrainOutput]:
             update_state, loss_info = jax.lax.scan(_update_epoch, update_state, None, config.training.update_epochs)
 
             runner_state = RunnerState(
-                update_state.train_state, runner_state.env_state, runner_state.last_obs, update_state.rng
+                train_state=update_state.train_state,
+                env_state=runner_state.env_state,
+                last_obs=runner_state.last_obs,
+                rng=update_state.rng,
             )
+
             return runner_state, mem_batch.info
 
         rng, _rng = jax.random.split(rng)

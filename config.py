@@ -57,8 +57,6 @@ class OptimizerConfig:
 @dataclass
 class ReinforcementLearningConfig:
     num_env_steps: int = field(default=10)
-    num_updates: int = field(default=10)
-    num_minibatches: int = field(default=32)
     gamma: float = field(default=0.99)
     gae_lambda: float = field(default=0.95)
     clip_eps: float = field(default=0.2)
@@ -72,12 +70,10 @@ class TrainingConfig:
     seed: int = field(default=1337)
     num_envs: int = field(default=2048)
     total_timesteps: int = field(default=1_000_000_000)
-    minibatch_size: int = field(default=64)
     num_minibatches: int = field(default=32)
-    num_steps: int = field(default=2048)
+    num_steps: int = field(default=10)
     update_epochs: int = field(default=4)
     anneal_lr: bool = field(default=True)
-    normalize_env: bool = field(default=True)
     model_save_path: str = field(default="trained_model.pkl")
 
 

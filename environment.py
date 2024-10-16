@@ -5,10 +5,9 @@ import logging
 import shutil
 import tempfile
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -50,8 +49,7 @@ def load_mjcf_model(kscale_id: str) -> mujoco.MjModel:
         return model
 
 
-@dataclass
-class EnvMetrics:
+class EnvMetrics(NamedTuple):
     episode_returns: jnp.ndarray
     episode_lengths: jnp.ndarray
     returned_episode_returns: jnp.ndarray
@@ -59,41 +57,13 @@ class EnvMetrics:
     timestep: jnp.ndarray
     returned_episode: jnp.ndarray
 
-    def tree_flatten(self) -> tuple[list[jnp.ndarray], None]:
-        return (
-            self.episode_returns,
-            self.episode_lengths,
-            self.returned_episode_returns,
-            self.returned_episode_lengths,
-            self.timestep,
-            self.returned_episode,
-        ), None
 
-    @classmethod
-    def tree_unflatten(cls, aux_data: Any, children: list[jnp.ndarray]) -> "EnvMetrics":  # noqa: ANN401
-        return cls(*children)
-
-
-jax.tree_util.register_pytree_node_class(EnvMetrics)
-
-
-@dataclass
-class EnvState:
+class EnvState(NamedTuple):
     pipeline_state: Any  # Use Any for MjxState as it's not a standard JAX type
     obs: jnp.ndarray
     reward: jnp.ndarray
     done: jnp.ndarray
     metrics: EnvMetrics
-
-    def tree_flatten(self) -> tuple[list[Any], None]:
-        return (self.pipeline_state, self.obs, self.reward, self.done, self.metrics), None
-
-    @classmethod
-    def tree_unflatten(cls, aux_data: Any, children: list[Any]) -> "EnvState":  # noqa: ANN401
-        return cls(*children)
-
-
-jax.tree_util.register_pytree_node_class(EnvState)
 
 
 class HumanoidEnv(PipelineEnv):
@@ -115,13 +85,8 @@ class HumanoidEnv(PipelineEnv):
     _action_size: int
     reset_noise_scale: float = 0.0
 
-    def __init__(
-        self,
-        config: Config,
-        backend: str = "mjx",
-        include_c_vals: bool = True,
-    ) -> None:
-        self._include_c_vals = include_c_vals
+    def __init__(self, config: Config) -> None:
+        self._include_c_vals = config.environment.include_c_vals
         self._kscale_id = config.kscale_id
 
         # Loads the MJCF model using the K-Scale API.
