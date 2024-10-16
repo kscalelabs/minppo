@@ -3,11 +3,12 @@
 import asyncio
 import logging
 import shutil
+import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from functools import partial
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -260,8 +261,11 @@ class HumanoidEnv(PipelineEnv):
         return jnp.concatenate(obs_components)
 
 
-def main() -> None:
+def main(args: Sequence[str] | None = None) -> None:
     """Runs the environment for a few steps with random actions, for debugging."""
+    if args is None:
+        args = sys.argv[1:]
+
     try:
         import mediapy as media
         from tqdm import tqdm
@@ -269,9 +273,9 @@ def main() -> None:
         raise ImportError("Please install `mediapy` and `tqdm` to run this script")
 
     if not shutil.which("ffmpeg"):
-        raise ImportError("Please install `ffmpeg` to run this script")
+        raise ImportError("`ffmpeg` command not found; please make sure the `ffmpeg` command is available")
 
-    config = load_config_from_cli()
+    config = load_config_from_cli(args)
     env = HumanoidEnv(config)
     action_size = env.action_size
 

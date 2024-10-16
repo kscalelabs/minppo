@@ -2,8 +2,12 @@
 
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Sequence
 
 from omegaconf import MISSING, OmegaConf
+
+CONFIG_ROOT_DIR = Path(__file__).parent / "configs"
 
 
 @dataclass
@@ -96,12 +100,20 @@ class Config:
     debug: bool = field(default=True)
 
 
-def load_config_from_cli() -> Config:
-    args = sys.argv[1:]
+def load_config_from_cli(args: Sequence[str] | None = None) -> Config:
+    if args is None:
+        args = sys.argv[1:]
     if len(args) < 1:
-        raise ValueError("Usage: cli <config_path> (<additional_args> ...)")
+        raise ValueError("Usage: <config_name_or_path> (<additional_args> ...)")
     path, *other_args = args
-    raw_config = OmegaConf.load(path)
+
+    if Path(path).exists():
+        raw_config = OmegaConf.load(path)
+    elif (config_path := CONFIG_ROOT_DIR / f"{path}.yaml").exists():
+        raw_config = OmegaConf.load(config_path)
+    else:
+        raise ValueError(f"Config file not found: {path}")
+
     config = OmegaConf.structured(Config)
     config = OmegaConf.merge(config, raw_config)
     if other_args:

@@ -3,6 +3,7 @@
 import logging
 import os
 import pickle
+import sys
 from typing import Any, Callable, NamedTuple, Sequence
 
 import distrax
@@ -17,7 +18,7 @@ from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
 
 from minppo.config import Config, load_config_from_cli
-from minppo.environment import HumanoidEnv
+from minppo.env import HumanoidEnv
 
 logger = logging.getLogger(__name__)
 
@@ -290,10 +291,13 @@ def make_train(config: Config) -> Callable[[jnp.ndarray], TrainOutput]:
     return train
 
 
-def main() -> None:
+def main(args: Sequence[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-    config = load_config_from_cli()
+    if args is None:
+        args = sys.argv[1:]
+
+    config = load_config_from_cli(args)
     logger.info("Configuration loaded")
 
     rng = jax.random.PRNGKey(config.training.seed)

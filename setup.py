@@ -10,12 +10,17 @@ with open("README.md", "r", encoding="utf-8") as f:
     long_description: str = f.read()
 
 
-with open("minppo/requirements.txt", "r", encoding="utf-8") as f:
+with open("requirements.txt", "r", encoding="utf-8") as f:
     requirements: list[str] = f.read().splitlines()
 
 
-with open("minppo/requirements-dev.txt", "r", encoding="utf-8") as f:
-    requirements_dev: list[str] = f.read().splitlines()
+requirements_dev = [
+    "black",
+    "darglint",
+    "mypy",
+    "pytest",
+    "ruff",
+]
 
 
 with open("minppo/__init__.py", "r", encoding="utf-8") as fh:

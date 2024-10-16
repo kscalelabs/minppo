@@ -17,7 +17,7 @@ from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
 
 from minppo.config import Config, load_config_from_cli
-from minppo.environment import HumanoidEnv
+from minppo.env import HumanoidEnv
 
 logger = logging.getLogger(__name__)
 

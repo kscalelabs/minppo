@@ -22,22 +22,30 @@
 
 This repository implements a minimal version of PPO using Jax.
 
-## Usage
+## Getting Started
 
-To visualize the environment, run:
+You can install the package using `pip`:
 
 ```bash
-python environment.py configs/stompy_pro.yaml
+pip install minppo
 ```
 
-To train the model, run:
+### Command Line Interface
+
+There are some default configurations in the `minppo/configs` directory which you can use to get started:
 
 ```bash
-python train.py configs/stompy_pro.yaml
+minppo train stompy_pro
 ```
 
-To run inference on the trained model, run:
+Alternatively, you can specify the path to the config file directly:
 
 ```bash
-python infer.py configs/stompy_pro.yaml 'inference.model_path=path/to/trained/model.pkl'
+minppo train configs/stompy_pro.yaml
+```
+
+Additionally, you can use dot notation to override specific parameters:
+
+```bash
+minppo train configs/stompy_pro.yaml 'rl.num_env_steps=1000'
 ```
