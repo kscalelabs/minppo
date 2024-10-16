@@ -17,10 +17,10 @@ dist/
 *.so
 out*/
 *.stl
-*.txt
 *.mp4
 *.notes
 
+# Directories
 environments/
 screenshots/
 scratch/
@@ -28,3 +28,6 @@ assets/
 wandb/
 models/
 logs/
+
+# Other artifacts
+MUJOCO_LOG.TXT
