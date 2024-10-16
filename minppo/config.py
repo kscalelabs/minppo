@@ -1,11 +1,14 @@
 """Defines the model configuration options."""
 
+import logging
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence, cast
 
 from omegaconf import MISSING, OmegaConf
+
+logger = logging.getLogger(__name__)
 
 CONFIG_ROOT_DIR = Path(__file__).parent / "configs"
 
@@ -118,5 +121,7 @@ def load_config_from_cli(args: Sequence[str] | None = None) -> Config:
     config = OmegaConf.merge(config, raw_config)
     if other_args:
         config = OmegaConf.merge(config, OmegaConf.from_dotlist(other_args))
+
+    logger.info("Loaded config: %s", OmegaConf.to_yaml(config))
 
     return cast(Config, config)

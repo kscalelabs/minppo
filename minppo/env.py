@@ -1,6 +1,7 @@
 """Definition of base humanoids environment with reward system and termination conditions."""
 
 import asyncio
+import contextlib
 import logging
 import shutil
 import sys
@@ -276,20 +277,25 @@ def main(args: Sequence[str] | None = None) -> None:
         raise ImportError("`ffmpeg` command not found; please make sure the `ffmpeg` command is available")
 
     config = load_config_from_cli(args)
+
     env = HumanoidEnv(config)
     action_size = env.action_size
+    logger.info("Initialized environment with action size %d", action_size)
 
-    rng = jax.random.PRNGKey(0)
+    rng = jax.random.PRNGKey(config.training.seed)
+    logger.info("Initialized random number generator with seed %d", config.training.seed)
+
     reset_fn = jax.jit(env.reset)
     step_fn = jax.jit(env.step)
 
     fps = int(1 / env.dt)
     max_frames = int(config.visualization.video_length * fps)
     rollout: list[MjxState] = []
+    logger.info("Starting episode loop")
 
     for episode in range(config.visualization.num_episodes):
         rng, _ = jax.random.split(rng)
-        env_state = reset_fn(rng)
+        env_state: EnvState = reset_fn(rng)
 
         total_reward = 0
 
@@ -301,7 +307,7 @@ def main(args: Sequence[str] | None = None) -> None:
             action = jax.random.uniform(action_rng, (action_size,), minval=0, maxval=1.0)
 
             rng, step_rng = jax.random.split(rng)
-            env_state = step_fn(env_state, action, step_rng)
+            env_state: EnvState = step_fn(env_state, action, step_rng)
             total_reward += env_state.reward
 
             if env_state.done:
