@@ -18,27 +18,26 @@
 
 </div>
 
-# Humanoid Standup
+# MinPPO
 
-Minimal training and inference code for making a humanoid robot stand up.
+This repository implements a minimal version of PPO using Jax.
 
-## Getting started
-- `export DISPLAY=:0` if in a headless environmnet
-- Run `train.py`!
+## Usage
 
-## TODO
+To visualize the environment, run:
 
-- [ ] Implement simple MJX environment using [Unitree G1 simulation artifacts](https://humanoids.wiki/w/Robot_Descriptions_List), similar to [this](https://gymnasium.farama.org/environments/mujoco/humanoid_standup)
-- [ ] Implement simple PPO policy to try to make the robot stand up
-- [ ] Parallelize using JAX
+```bash
+python environment.py configs/stompy_pro.yaml
+```
 
-# Findings
-- Low standard deviation for "overfitting test" does not work very well for PPO because need to converge upon actual solution. Cannot get to actual solution if do not explore a little. With that in mind, I think the model is generally getting too comfortable tricking the reward system by just losing as fast as posisble so doesn't have to deal with penalty
-- Theory that model just trying to lose (to retain `is_healthy` while not losing as much height. It wants to fall as quick as possible so can reset) can be tested by adding "wait" and removing the mask. This effectively reduces the fact that reset will work. While the model is stuck in the failed state, it still is unhealthy and therefore loses out on reward.
+To train the model, run:
 
-## Goals
+```bash
+python train.py configs/stompy_pro.yaml
+```
 
-- The goal for this repository is to provide a super minimal implementation of a PPO policy for making a humanoid robot stand up, with only three files:
-  - `environment.py` defines a class for interacting with the environment
-  - `train.py` defines the core training loop
-  - `infer.py` generates a video clip of a trained model controlling a robot
+To run inference on the trained model, run:
+
+```bash
+python infer.py configs/stompy_pro.yaml 'inference.model_path=path/to/trained/model.pkl'
+```

@@ -1,12 +1,11 @@
 """Definition of base humanoids environment with reward system and termination conditions."""
 
-import argparse
 import asyncio
 import logging
 import shutil
 import tempfile
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -20,27 +19,9 @@ from brax.io import mjcf
 from brax.mjx.base import State as MjxState
 from kscale import KScale
 
+from config import Config, load_config_from_cli
+
 logger = logging.getLogger(__name__)
-
-DEFAULT_KSCALE_ID = "5eb3cb7f23232298"
-INCLUDE_C_VALS = True
-PHYSICS_FRAMES = 1
-
-
-@dataclass
-class RewardConfig:
-    termination_height: float = field(default=-0.2)
-    height_min_z: float = field(default=-0.2)
-    height_max_z: float = field(default=2.0)
-    is_healthy_reward: float = field(default=5)
-    original_pos_reward_exp_coefficient: float = field(default=2)
-    original_pos_reward_subtraction_factor: float = field(default=0.2)
-    original_pos_reward_max_diff_norm: float = field(default=0.5)
-    ctrl_cost_coefficient: float = field(default=0.1)
-    weights_ctrl_cost: float = field(default=0.1)
-    weights_original_pos_reward: float = field(default=4)
-    weights_is_healthy: float = field(default=1)
-    weights_velocity: float = field(default=1.25)
 
 
 def load_mjcf_model(kscale_id: str) -> mujoco.MjModel:
@@ -48,6 +29,8 @@ def load_mjcf_model(kscale_id: str) -> mujoco.MjModel:
     mjcf_path = asyncio.run(api.mjcf_path(kscale_id))
 
     # We need to fix up the MJCF model to allow it to work with Brax.
+    # Specifically, we need to remove the frictionloss attribute from the
+    # joints element, as Brax does not support it.
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_mjcf_dir = Path(temp_dir) / mjcf_path.parent.name
         shutil.copytree(mjcf_path.parent, temp_mjcf_dir)
@@ -134,12 +117,15 @@ class HumanoidEnv(PipelineEnv):
 
     def __init__(
         self,
-        n_frames: int = PHYSICS_FRAMES,
+        config: Config,
         backend: str = "mjx",
-        kscale_id: str = DEFAULT_KSCALE_ID,
+        include_c_vals: bool = True,
     ) -> None:
-        # Loads the MJCF model.
-        mj_model: mujoco.MjModel = load_mjcf_model(kscale_id)
+        self._include_c_vals = include_c_vals
+        self._kscale_id = config.kscale_id
+
+        # Loads the MJCF model using the K-Scale API.
+        mj_model: mujoco.MjModel = load_mjcf_model(self._kscale_id)
         mj_model.opt.solver = mujoco.mjtSolver.mjSOL_CG
         mj_model.opt.iterations = 6
         mj_model.opt.ls_iterations = 6
@@ -147,10 +133,10 @@ class HumanoidEnv(PipelineEnv):
         self._action_size = mj_model.nu
         sys: base.System = mjcf.load_model(mj_model)
 
-        super().__init__(sys, n_frames=n_frames, backend=backend)
+        super().__init__(sys, n_frames=config.environment.n_frames, backend=config.environment.backend)
 
         self.initial_qpos = jnp.array(sys.qpos0)
-        self.reward_config = RewardConfig()
+        self.reward_config = config.reward
 
         # Currently unused
         actuator_ctrlrange = []
@@ -291,7 +277,7 @@ class HumanoidEnv(PipelineEnv):
 
     @partial(jax.jit, static_argnums=(0,))
     def get_obs(self, data: MjxState, action: jnp.ndarray) -> jnp.ndarray:
-        if INCLUDE_C_VALS:
+        if self._include_c_vals:
             obs_components = [
                 data.qpos,
                 data.qvel,
@@ -309,7 +295,7 @@ class HumanoidEnv(PipelineEnv):
         return jnp.concatenate(obs_components)
 
 
-def run_environment_adhoc() -> None:
+def main() -> None:
     """Runs the environment for a few steps with random actions, for debugging."""
     try:
         import mediapy as media
@@ -320,64 +306,8 @@ def run_environment_adhoc() -> None:
     if not shutil.which("ffmpeg"):
         raise ImportError("Please install `ffmpeg` to run this script")
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--num-episodes",
-        type=int,
-        default=20,
-        help="number of episodes to run",
-    )
-    parser.add_argument(
-        "--max-steps",
-        type=int,
-        default=1024,
-        help="maximum steps per episode",
-    )
-    parser.add_argument(
-        "--output-path",
-        type=str,
-        default="episode.mp4",
-        help="path to save video",
-    )
-    parser.add_argument(
-        "--render-every",
-        type=int,
-        default=2,
-        help="how many frames to skip between renders",
-    )
-    parser.add_argument(
-        "--video-length",
-        type=float,
-        default=5.0,
-        help="desired length of video in seconds",
-    )
-    parser.add_argument(
-        "--width",
-        type=int,
-        default=640,
-        help="width of the video frame",
-    )
-    parser.add_argument(
-        "--height",
-        type=int,
-        default=480,
-        help="height of the video frame",
-    )
-    parser.add_argument(
-        "--kscale-id",
-        type=str,
-        default=DEFAULT_KSCALE_ID,
-        help="ID of the robot to load from K-Scale",
-    )
-    parser.add_argument(
-        "--camera-name",
-        type=str,
-        default="track",
-        help="name of the camera to use for rendering",
-    )
-    args = parser.parse_args()
-
-    env = HumanoidEnv()
+    config = load_config_from_cli()
+    env = HumanoidEnv(config)
     action_size = env.action_size
 
     rng = jax.random.PRNGKey(0)
@@ -385,17 +315,17 @@ def run_environment_adhoc() -> None:
     step_fn = jax.jit(env.step)
 
     fps = int(1 / env.dt)
-    max_frames = int(args.video_length * fps)
+    max_frames = int(config.visualization.video_length * fps)
     rollout: list[MjxState] = []
 
-    for episode in range(args.num_episodes):
+    for episode in range(config.visualization.num_episodes):
         rng, _ = jax.random.split(rng)
         env_state = reset_fn(rng)
 
         total_reward = 0
 
-        for _ in tqdm(range(args.max_steps), desc=f"Episode {episode + 1} Steps", leave=False):
-            if len(rollout) < args.video_length * fps:
+        for _ in tqdm(range(config.visualization.max_steps), desc=f"Episode {episode + 1} Steps", leave=False):
+            if len(rollout) < config.visualization.video_length * fps:
                 rollout.append(env_state.pipeline_state)
 
             rng, action_rng = jax.random.split(rng)
@@ -417,18 +347,18 @@ def run_environment_adhoc() -> None:
 
     images = jnp.array(
         env.render(
-            rollout[:: args.render_every],
-            camera=args.camera_name,
-            width=args.width,
-            height=args.height,
+            rollout[:: config.visualization.render_every],
+            camera=config.visualization.camera_name,
+            width=config.visualization.width,
+            height=config.visualization.height,
         )
     )
 
     logger.info("Video rendered")
-    media.write_video(args.output_path, images, fps=fps)
-    logger.info("Video saved to %s", args.output_path)
+    media.write_video(config.visualization.video_save_path, images, fps=fps)
+    logger.info("Video saved to %s", config.visualization.video_save_path)
 
 
 if __name__ == "__main__":
     # python environment.py
-    run_environment_adhoc()
+    main()
