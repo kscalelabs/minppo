@@ -1,7 +1,6 @@
 """Definition of base humanoids environment with reward system and termination conditions."""
 
 import asyncio
-import contextlib
 import logging
 import shutil
 import sys
