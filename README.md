@@ -20,44 +20,4 @@
 
 # MinPPO
 
-This repository implements a minimal version of PPO using Jax.
-
-## Getting Started
-
-You can install the package using `pip`:
-
-```bash
-pip install minppo
-```
-
-### Command Line Interface
-
-There are some default configurations in the `minppo/configs` directory which you can use to get started:
-
-```bash
-minppo train stompy_pro
-```
-
-Alternatively, you can specify the path to the config file directly:
-
-```bash
-minppo train configs/stompy_pro.yaml
-```
-
-Additionally, you can use dot notation to override specific parameters:
-
-```bash
-minppo train configs/stompy_pro.yaml 'rl.num_env_steps=1000'
-```
-
-You can visualize the environment with:
-
-```bash
-minppo env stompy_pro
-```
-
-Finally, you can run inference on a trained model with:
-
-```bash
-minppo infer stompy_pro 'inference.model_path=path/to/model.pkl'
-```
+This repository implements a minimal version of PPO using Jax. For more information, see the [documentation](https://docs.kscale.dev/software/simulation/minppo).
