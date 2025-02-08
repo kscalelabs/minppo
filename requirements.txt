@@ -4,12 +4,17 @@
 tqdm
 colorlogging
 
+# Subsequent Jax versions are much slower with MJX.
+jax==0.4.30
+jaxlib==0.4.30
+
 # Environment
-brax
+brax==0.10.5
 distrax
 equinox
-jax
 optax
+
+# Models
 kscale
 
 # Configuration management.
