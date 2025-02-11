@@ -283,7 +283,7 @@ def main(args: Sequence[str] | None = None) -> None:
         rng, _ = jax.random.split(rng)
         env_state: EnvState = reset_fn(rng)
 
-        total_reward = 0
+        total_reward: float = 0.0
 
         for _ in tqdm(range(config.visualization.max_steps), desc=f"Episode {episode + 1} Steps", leave=False):
             if len(rollout) < config.visualization.video_length * fps:
@@ -293,8 +293,8 @@ def main(args: Sequence[str] | None = None) -> None:
             action = jax.random.uniform(action_rng, (action_size,), minval=0, maxval=1.0)
 
             rng, step_rng = jax.random.split(rng)
-            env_state: EnvState = step_fn(env_state, action, step_rng)
-            total_reward += env_state.reward
+            env_state = step_fn(env_state, action, step_rng)
+            total_reward += float(env_state.reward)
 
             if env_state.done:
                 break
@@ -321,5 +321,5 @@ def main(args: Sequence[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    # python environment.py
+    # python -m minppo.env
     main()

@@ -4,9 +4,8 @@
 tqdm
 colorlogging
 
-# Subsequent Jax versions are much slower with MJX.
-jax==0.4.30
-jaxlib==0.4.30
+# Jax
+jax
 
 # Environment
 brax==0.10.5
