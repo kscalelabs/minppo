@@ -4,7 +4,7 @@ import logging
 import os
 import pickle
 import sys
-from typing import Any, Callable, NamedTuple, Sequence
+from typing import Any, Callable, NamedTuple, Sequence, cast
 
 import distrax
 import flax.linen as nn
@@ -170,7 +170,7 @@ def make_train(config: Config) -> Callable[[jnp.ndarray], TrainOutput]:
                 info = env_state.metrics
 
                 # Store experience for later use in PPO updates
-                memory = Memory(done, action, value, reward, log_prob, last_obs, info)
+                memory = Memory(done, action, cast(jnp.ndarray, value), reward, log_prob, last_obs, info)
                 runner_state = RunnerState(train_state, env_state, obs, rng)
 
                 return runner_state, memory
