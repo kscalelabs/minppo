@@ -8,7 +8,7 @@ colorlogging
 jax
 
 # Environment
-brax==0.10.5
+brax
 distrax
 equinox
 optax
