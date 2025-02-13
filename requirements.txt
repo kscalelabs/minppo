@@ -4,12 +4,16 @@
 tqdm
 colorlogging
 
+# Jax
+jax
+
 # Environment
 brax
 distrax
 equinox
-jax
 optax
+
+# Models
 kscale
 
 # Configuration management.

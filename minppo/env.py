@@ -4,12 +4,10 @@ import asyncio
 import logging
 import shutil
 import sys
-import tempfile
-import xml.etree.ElementTree as ET
 from functools import partial
-from pathlib import Path
 from typing import Any, NamedTuple, Sequence
 
+import colorlogging
 import jax
 import jax.numpy as jnp
 import mujoco
@@ -17,37 +15,24 @@ from brax import base
 from brax.envs.base import PipelineEnv
 from brax.io import mjcf
 from brax.mjx.base import State as MjxState
-from kscale import KScale
+from kscale import K
 
 from minppo.config import Config, load_config_from_cli
 
 logger = logging.getLogger(__name__)
 
 
-def load_mjcf_model(kscale_id: str) -> mujoco.MjModel:
-    api = KScale()
-    mjcf_path = asyncio.run(api.mjcf_path(kscale_id))
+async def load_mjcf_model(kscale_id: str) -> mujoco.MjModel:
+    async with K() as api:
+        urdf_dir = await api.download_and_extract_urdf(kscale_id)
 
-    # We need to fix up the MJCF model to allow it to work with Brax.
-    # Specifically, we need to remove the frictionloss attribute from the
-    # joints element, as Brax does not support it.
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_mjcf_dir = Path(temp_dir) / mjcf_path.parent.name
-        shutil.copytree(mjcf_path.parent, temp_mjcf_dir)
-        temp_mjcf_path = temp_mjcf_dir / mjcf_path.name
-        tree = ET.parse(temp_mjcf_path)
-        root = tree.getroot()
+    try:
+        mjcf_path = next(urdf_dir.glob("*.mjcf"))
+    except StopIteration:
+        raise ValueError(f"No MJCF file found for {kscale_id} (in {urdf_dir})")
 
-        # Updates the <mujoco><default><joint> element to remove frictionloss attrib.
-        for joint in root.findall(".//default/joint"):
-            if "frictionloss" in joint.attrib:
-                del joint.attrib["frictionloss"]
-
-        # Write the modified XML back to the file
-        tree.write(temp_mjcf_path)
-
-        model: mujoco.MjModel = mujoco.MjModel.from_xml_path(str(temp_mjcf_path))
-        return model
+    model: mujoco.MjModel = mujoco.MjModel.from_xml_path(str(mjcf_path))
+    return model
 
 
 class EnvMetrics(NamedTuple):
@@ -91,7 +76,7 @@ class HumanoidEnv(PipelineEnv):
         self._kscale_id = config.kscale_id
 
         # Loads the MJCF model using the K-Scale API.
-        mj_model: mujoco.MjModel = load_mjcf_model(self._kscale_id)
+        mj_model: mujoco.MjModel = asyncio.run(load_mjcf_model(self._kscale_id))
         mj_model.opt.solver = mujoco.mjtSolver.mjSOL_CG
         mj_model.opt.iterations = 6
         mj_model.opt.ls_iterations = 6
@@ -263,6 +248,8 @@ class HumanoidEnv(PipelineEnv):
 
 def main(args: Sequence[str] | None = None) -> None:
     """Runs the environment for a few steps with random actions, for debugging."""
+    colorlogging.configure()
+
     if args is None:
         args = sys.argv[1:]
 
@@ -296,7 +283,7 @@ def main(args: Sequence[str] | None = None) -> None:
         rng, _ = jax.random.split(rng)
         env_state: EnvState = reset_fn(rng)
 
-        total_reward = 0
+        total_reward: float = 0.0
 
         for _ in tqdm(range(config.visualization.max_steps), desc=f"Episode {episode + 1} Steps", leave=False):
             if len(rollout) < config.visualization.video_length * fps:
@@ -306,8 +293,8 @@ def main(args: Sequence[str] | None = None) -> None:
             action = jax.random.uniform(action_rng, (action_size,), minval=0, maxval=1.0)
 
             rng, step_rng = jax.random.split(rng)
-            env_state: EnvState = step_fn(env_state, action, step_rng)
-            total_reward += env_state.reward
+            env_state = step_fn(env_state, action, step_rng)
+            total_reward += float(env_state.reward)
 
             if env_state.done:
                 break
@@ -334,5 +321,5 @@ def main(args: Sequence[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    # python environment.py
+    # python -m minppo.env
     main()
