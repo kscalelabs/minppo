@@ -22,6 +22,11 @@ requirements_dev = [
     "ruff",
 ]
 
+requirements_env = [
+    "mediapy",
+    "tqdm",
+]
+
 
 with open("minppo/__init__.py", "r", encoding="utf-8") as fh:
     version_re = re.search(r"^__version__ = \"([^\"]*)\"", fh.read(), re.MULTILINE)
@@ -40,7 +45,11 @@ setup(
     python_requires=">=3.11",
     install_requires=requirements,
     tests_require=requirements_dev,
-    extras_require={"dev": requirements_dev},
+    extras_require={
+        "dev": requirements_dev,
+        "env": requirements_env,
+        "all": requirements_dev + requirements_env,
+    },
     entry_points={
         "console_scripts": [
             "minppo=minppo.cli:main",

@@ -1,4 +1,4 @@
-kscale_id: kbot-v1-min
+kscale_id: kbot-v1
 visualization:
   camera_name: track
 training:
